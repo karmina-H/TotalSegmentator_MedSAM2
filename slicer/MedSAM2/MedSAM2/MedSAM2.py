@@ -171,7 +171,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.btnRefine3D.setIcon(QIcon(os.path.join(iconsPath, 'performance.png')))
         self.ui.btnAddPoint.setIcon(QIcon(os.path.join(iconsPath, 'add-selection.png')))
         self.ui.btnSubtractPoint.setIcon(QIcon(os.path.join(iconsPath, 'sub-selection.png')))
-        self.ui.btnImprove.setIcon(QIcon(os.path.join(iconsPath, 'continuous-improvement.png')))
+
 
         # Buttons
         self.ui.btnEnd.connect("clicked(bool)", self.logic.run_TotalSegmentator)
@@ -180,7 +180,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.btnRefine3D.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnAddPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='addition'))
         self.ui.btnSubtractPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='subtraction'))
-        self.ui.btnImprove.connect("clicked(bool)", lambda: self.logic.improveResult())
+
 
         self.ui.btnROI.setVisible(False)
         self.ui.btnMiddleSlice.setVisible(False)
@@ -267,11 +267,6 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
 
 
-#
-# MedSAM2Logic
-#
-
-
 class MedSAM2Logic(ScriptedLoadableModuleLogic):
     """This class should implement all the actual
     computation done by your module.  The interface
@@ -307,6 +302,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     def getParameterNode(self):
         return MedSAM2ParameterNode(super().getParameterNode())
     
+    # 현재 3D slicer에 올라와있는 이미지로 image_data에 저장하는 함수
     def captureImage(self):
         self.volume_node = slicer.util.getNodesByClass('vtkMRMLScalarVolumeNode')[0]
         if self.volume_node.GetNodeTagName() == 'LabelMapVolume': ### some volumes are loaded as LabelMapVolume instead of ScalarVolume, temporary
@@ -321,37 +317,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             self.volume_node = sef
 
         self.image_data = slicer.util.arrayFromVolume(self.volume_node)  ################ Only one node?
-
     
-    def get_point_coords(self):
-        self.captureImage()
-        pointNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsFiducialNode')
-
-        # If volume node is transformed, apply that transform to get volume's RAS coordinates
-        transformRasToVolumeRas = vtk.vtkGeneralTransform()
-        slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, self.volume_node.GetParentTransformNode(), transformRasToVolumeRas)
-        
-        point_list = {}
-        for pointNode in pointNodes:
-            bounds = np.zeros(6)
-            pointNode.GetBounds(bounds)
-            curr_point = bounds[::2].copy()
-            ijk_points = []
-
-            # Get point coordinate in RAS
-            point_VolumeRas = transformRasToVolumeRas.TransformPoint(curr_point)
-
-            # Get voxel coordinates from physical coordinates
-            volumeRasToIjk = vtk.vtkMatrix4x4()
-            self.volume_node.GetRASToIJKMatrix(volumeRasToIjk)
-            point_Ijk = [0, 0, 0, 1]
-            volumeRasToIjk.MultiplyPoint(np.append(point_VolumeRas,1.0), point_Ijk)
-            point_Ijk = [ int(round(c)) for c in point_Ijk[0:3] ]
-            
-            point_list[pointNode.GetID()] = point_Ijk
-
-        return point_list
-    
+    # background에서 분할하는 서버왔다갔다하는거
     def run_on_background(self, target, args, title):
         self.progressbar = slicer.util.createProgressDialog(autoClose=False)
         self.progressbar.minimum = 0
@@ -368,6 +335,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.progressbar.close()
     
     
+    # Total segmentator로 1차분할한 결과에서 padding더해서 경계박스 만들어주는 함수 
     def get_bounding_info_from_labels(self,gst, padding=10):
         """
         Args:
@@ -430,13 +398,14 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             
         return slice_idx, zrange, boxes_3D
 
-
+    # Totasegmentator api로 1차분할 실행
     def run_TotalSegmentator(self):
         if self.volume_node is None:
             raise RuntimeError("활성 볼륨이 없습니다. 먼저 볼륨을 로드/선택하세요.")
         
         self.segmentation(filetype='nifti', roi_organs=['spleen','liver'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
 
+    # segmentation_mask를 가지고 3D slicer에 올려서 시각화해주는 코드
     def showSegmentation(self, segmentation_mask, improve_previous=False):
         if self.allSegmentsNode is None:
             self.allSegmentsNode = slicer.mrmlScene.AddNewNoshowSegmentationdeByClass("vtkMRMLSegmentationNode")
@@ -468,6 +437,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.lastSegmentLabel = new_seg_label
         print('self.lastSegmentLabel is updated to', self.lastSegmentLabel)
 
+    # 실제 Totalsegmentator돌리는 코드
     def segmentation(self, filetype, roi_organs, ip, port):
         print("Min:", self.image_data_hu .min(), "Max:", self.image_data_hu .max())
         print("Min:", self.image_data_norm .min(), "Max:", self.image_data_norm .max())
@@ -629,6 +599,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         slicer.util.updateVolumeFromArray(outNode, self.image_data) # 정규화한 값으로 3D slicer Node주기
 
 
+    # 분할하기 위해서 서버에 데이터 보내는 함수
     def segment_helper(self, img_path, gts_path, result_path, ip, port, job_event):
         config, checkpoint = self.getConfigCheckpoint()
 
@@ -680,6 +651,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         job_event.set()
 
 
+    # MedSAM2로 분할하는 함수
     def segment(self):
         self.captureImage()
         # segment할 슬라이스인덱스, 경계박스, z범위
@@ -728,75 +700,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(roiNode)
         self.boundaries = None
     
-    def middle_mask_helper(self, img_path, result_path, ip, port, job_event):
-        config, checkpoint = self.getConfigCheckpoint()
-        
-        # ui에 모델 파일경로가 있을경우
-        if self.widget.ui.pathModel.currentPath != '' and not self.newModelUploaded:
-            # TODO: Check if model is valid
-            self.progressbar.setLabelText(' uploading model... ')
-            upload_url = 'http://%s:%s/upload_model'%(ip, port)
-
-            with open(self.widget.ui.pathModel.currentPath, 'rb') as file:
-                files = {'file': file}
-                response = requests.post(upload_url, files=files)
-                self.newModelUploaded = True # used for caching
-        
-        # 딥러닝 config파일 서버에 업로드
-        if self.widget.ui.pathConfig.currentPath != '' and not self.newConfigUploaded:
-            # TODO: Check if config is valid
-            self.progressbar.setLabelText(' uploading config file... ')
-            upload_url = 'http://%s:%s/upload_config'%(ip, port)
-
-            with open(self.widget.ui.pathConfig.currentPath, 'rb') as file:
-                files = {'file': file}
-                response = requests.post(upload_url, files=files)
-                self.newConfigUploaded = True # used for caching
-
-        # 분할할 이미지데이터를 서버에 업로드
-        self.progressbar.setLabelText(' uploading image... ')
-        upload_url = 'http://%s:%s/upload'%(ip, port)
-
-        with open(img_path, 'rb') as file:
-            # img_path에 원본 이미지의 넘파이배열과 경계박스 그리고 z축범위가 들어가 가있음.
-            files = {'file': file}
-            response = requests.post(upload_url, files=files)
-
-
-        # 서버인 run_script에 데이터 주면서 결과추론
-        self.progressbar.setLabelText(' segmenting... ')
-        run_script_url = 'http://%s:%s/run_script'%(ip, port)
-
-        print('data sent is: ', {
-                'checkpoint': checkpoint,
-                'input': os.path.basename(img_path),
-                'gts': 'X',
-                'propagate': 'N',
-                'config': config,
-            })
-
-        response = requests.post(
-            run_script_url,
-            data={
-                'checkpoint': checkpoint,
-                'input': os.path.basename(img_path),
-                'gts': 'X',
-                'propagate': 'N',
-                'config': config,
-            }
-        )
-
-        # 분할결과를 서버에서 다운로드
-        self.progressbar.setLabelText(' downloading results... ')
-        download_file_url = 'http://%s:%s/download_file'%(ip, port)
-
-        response = requests.get(download_file_url, data={'output': 'data/video/segs_tiny/%s'%os.path.basename(img_path)})
-
-        with open(result_path, 'wb') as f:
-            f.write(response.content)
-        
-        job_event.set()
-
+    # 현재 3D slicer에 올라와있는 분할된 마스크를 가지고 넘파이배열로 만들어서 return하는 함수
     def getSegmentationArray(self, segmentationNode=None):
         """
         Convert SegmentationNode into 3D numpy array.
@@ -834,10 +738,12 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         return result
 
     
+    # SegmentEditor로 UI로 바꾸는 함수
     def refineMiddleMask(self):
         slicer.util.selectModule("SegmentEditor") 
 
-    
+
+    # CT 이미지전처리하는 함수
     def preprocess_CT(self, win_level=40.0, win_width=400.0):
         self.captureImage()
 
@@ -856,6 +762,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         return image_data_pre
     
+    # MRI 이미지전처리하는 함수
     def preprocess_MR(self, lower_percent=0.5, upper_percent=99.5):
         self.captureImage()
 
@@ -873,10 +780,12 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.image_data_norm = image_data_pre
         return image_data_pre
     
+
     def updateImage(self, new_image):
         self.image_data[:,:,:] = new_image
         slicer.util.arrayFromVolumeModified(self.volume_node)
     
+    # 전처리 진행하는함수
     def applyPreprocess(self, method, win_level, win_width):
         if method == 'MR':
             prep_img = self.preprocess_MR()
@@ -895,7 +804,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.updateImage(prep_img)
 
         
-    
+    # config파일과 checkpint가져오는 함수
     def getConfigCheckpoint(self):
         if self.widget.ui.pathConfig.currentPath == '':
             config = 'MedSAM2_tiny512.yaml'
@@ -911,72 +820,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         return config, checkpoint
     
 
-    def improve_helper(self, img_path, result_path, ip, port, job_event):
-        self.progressbar.setLabelText(' uploading improvement details... ')
-        upload_url = 'http://%s:%s/upload'%(ip, port)
-
-        with open(img_path, 'rb') as file:
-            files = {'file': file}
-            response = requests.post(upload_url, files=files)
-
-        self.progressbar.setLabelText(' improving... ')
-        improve_url = 'http://%s:%s/improve'%(ip, port)
-
-        print('data sent is: ', {
-                'input': os.path.basename(img_path),
-            })
-
-        response = requests.post(
-            improve_url,
-            data={
-                'input': os.path.basename(img_path),
-            }
-        )
-
-
-        self.progressbar.setLabelText(' downloading results... ')
-        download_file_url = 'http://%s:%s/download_file'%(ip, port)
-
-        response = requests.get(download_file_url, data={'output': 'data/video/segs_tiny/%s'%os.path.basename(img_path)})
-
-        with open(result_path, 'wb') as f:
-            f.write(response.content)
-        
-        job_event.set()
-    
-
-    def improveResult(self):
-        # TODO: Make sure a full inference is already performed [you can use self.cachedBoundaries]
-        # TODO: Make sure that new points fall within the latest inference bounds
-
-        point_list = self.get_point_coords()
-        points_partition = {'addition': [], 'subtraction': []}
-        for point_name in point_list:
-            point_type = 'addition' if 'addition' in slicer.util.getNode(point_name).GetName() else 'subtraction'
-            points_partition[point_type].append(point_list[point_name])
-        print(points_partition)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            img_path = "%s/img_data.npz"%(tmpdirname,)
-            result_path = "%s/result.npz"%(tmpdirname,)
-            np.savez(img_path,
-                bboxes=self.cachedBoundaries['bboxes'],
-                zrange=self.cachedBoundaries['zrange'],
-                points_addition=points_partition['addition'],
-                points_subtraction=points_partition['subtraction'],
-                img_size=self.image_data.shape[:3]
-            )
-            self.run_on_background(self.improve_helper, (img_path, result_path, self.widget.ui.txtIP.text.strip(), self.widget.ui.txtPort.text.strip()), 'Improving Segmentation...')
-            
-            # loading results
-            segmentation_mask = np.load(result_path, allow_pickle=True)['segs']
-            self.showSegmentation(segmentation_mask, improve_previous=True)
-        
-        pointNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsFiducialNode')
-        for pointNode in pointNodes:
-            slicer.mrmlScene.RemoveNode(pointNode)
-
-# custom함수
+    # 현재 보고있는 슬라이스의 인덱스를 반환하는 함수
     def getCurrentSliceKIndex(self, viewName="Red"):
         # 1) 필요한 노드/행렬들
         sliceLogic = slicer.app.layoutManager().sliceWidget(viewName).sliceLogic()
@@ -1006,40 +850,3 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         # 안전 클램핑
         k = max(0, min(k, self.image_data.shape[0] - 1))
         return k
-
-#
-# MedSAM2Test
-#
-
-
-class MedSAM2Test(ScriptedLoadableModuleTest):
-    """
-    This is the test case for your scripted module.
-    Uses ScriptedLoadableModuleTest base class, available at:
-    https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
-    """
-
-    def setUp(self):
-        """Do whatever is needed to reset the state - typically a scene clear will be enough."""
-        slicer.mrmlScene.Clear()
-
-    def runTest(self):
-        """Run as few or as many tests as needed here."""
-        self.setUp()
-        self.test_MedSAM21()
-
-    def test_MedSAM21(self):
-        """Ideally you should have several levels of tests.  At the lowest level
-        tests should exercise the functionality of the logic with different inputs
-        (both valid and invalid).  At higher levels your tests should emulate the
-        way the user would interact with your code and confirm that it still works
-        the way you intended.
-        One of the most important features of the tests is that it should alert other
-        developers when their changes will have an impact on the behavior of your
-        module.  For example, if a developer removes a feature that you depend on,
-        your test should break so they know that the feature is needed.
-        """
-
-        self.delayDisplay("Starting the test")
-
-        self.delayDisplay("Test passed")
