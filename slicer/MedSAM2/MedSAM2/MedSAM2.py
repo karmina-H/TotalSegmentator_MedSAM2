@@ -292,7 +292,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     lastSegmentLabel = None
     Total_segmentator_mask_path = None
 
-    ##custom 변수
+    # 선택한 slice 인덱스
     slice_idx_override = None
 
     def __init__(self) -> None:
@@ -439,8 +439,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
     # 실제 Totalsegmentator돌리는 코드
     def segmentation(self, filetype, roi_organs, ip, port):
-        print("Min:", self.image_data_hu .min(), "Max:", self.image_data_hu .max())
-        print("Min:", self.image_data_norm .min(), "Max:", self.image_data_norm .max())
+        print("hu_Min:", self.image_data_hu .min(), "hu_Max:", self.image_data_hu .max())
+        print("norm_Min:", self.image_data_norm .min(), "norm_Max:", self.image_data_norm .max())
         # 일단 여기서 넘파이배열 -> NIFTI파일로 변환해주고 그걸 TOTALSEGMENTATOR에 넣어주기
         # 참조 노드에서 IJK→RAS, spacing, origin 가져오기
         ijkToRas = vtk.vtkMatrix4x4()
@@ -700,6 +700,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(roiNode)
         self.boundaries = None
     
+
     # 현재 3D slicer에 올라와있는 분할된 마스크를 가지고 넘파이배열로 만들어서 return하는 함수
     def getSegmentationArray(self, segmentationNode=None):
         """
