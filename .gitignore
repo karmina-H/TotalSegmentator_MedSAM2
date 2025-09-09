@@ -1,0 +1,11 @@
+__pycache__/
+assets/
+checkpoints/
+data/
+outputs/
+SAM_2.egg-info/
+sam2/
+tools/
+training/
+uploads/
+
