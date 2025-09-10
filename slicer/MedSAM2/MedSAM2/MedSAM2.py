@@ -3,6 +3,7 @@ import os
 from typing import Annotated, Optional
 import traceback
 
+
 import vtk
 
 import slicer
@@ -27,6 +28,8 @@ import gzip
 import io
 import os
 import nibabel as nib
+import SimpleITK as sitk
+import glob
 
 from totalsegmentator.python_api import totalsegmentator
 #
@@ -156,6 +159,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.pbApplyPrep.setIcon(QIcon(os.path.join(iconsPath, 'verify.png')))
         self.ui.btnStart.setText("Use Current Slice")
         self.ui.btnEnd.setText("Total Segmentator")
+        self.ui.btnROI.setText("Run normalized doing Totalsegmentator")
         def _fix_current_slice_idx():
             try:
                 k = self.logic.getCurrentSliceKIndex("Red")
@@ -171,23 +175,24 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.btnRefine3D.setIcon(QIcon(os.path.join(iconsPath, 'performance.png')))
         self.ui.btnAddPoint.setIcon(QIcon(os.path.join(iconsPath, 'add-selection.png')))
         self.ui.btnSubtractPoint.setIcon(QIcon(os.path.join(iconsPath, 'sub-selection.png')))
+        self.ui.btnMiddleSlice.setText('show gt mask or turn off')
 
-
+        
         # Buttons
+        self.ui.btnROI.connect("clicked(bool)", lambda: self.logic.norm_btn) # 정규화버튼
         self.ui.btnEnd.connect("clicked(bool)", self.logic.run_TotalSegmentator)
         self.ui.btnRefine.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnSegment.connect("clicked(bool)", self.logic.segment)
         self.ui.btnRefine3D.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnAddPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='addition'))
         self.ui.btnSubtractPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='subtraction'))
+        self.ui.btnMiddleSlice.connect("clicked(bool)", lambda: self.logic.showGroundTruth('C:/Users/gusdb/MedSAMSlicer-MedSAM2/slicer/MedSAM2/Mask_Liver')) # 이거 GT데이터 보여주는 버튼
 
-
-        self.ui.btnROI.setVisible(False)
-        self.ui.btnMiddleSlice.setVisible(False)
+        #self.ui.btnROI.setVisible(False)
+        #self.ui.btnMiddleSlice.setVisible(False)
         self.ui.CollapsibleButton_5.setVisible(False)
         self.ui.btnAddPoint.setVisible(False)
         self.ui.btnSubtractPoint.setVisible(False)
-        self.ui.btnImprove.setVisible(False)
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -277,6 +282,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
     """
 
+    norm_b = False
     image_data_hu = None
     image_data_norm = None
 
@@ -318,6 +324,9 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         self.image_data = slicer.util.arrayFromVolume(self.volume_node)  ################ Only one node?
     
+    def norm_btn(self):
+        self.norm_b = True
+
     # background에서 분할하는 서버왔다갔다하는거
     def run_on_background(self, target, args, title):
         self.progressbar = slicer.util.createProgressDialog(autoClose=False)
@@ -336,7 +345,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     
     
     # Total segmentator로 1차분할한 결과에서 padding더해서 경계박스 만들어주는 함수 
-    def get_bounding_info_from_labels(self,gst, padding=10):
+    def get_bounding_info_from_labels(self,gst, padding=3):
         """
         Args:
             gst (np.ndarray): 정수 레이블을 포함하는 (depth, height, width) 형태의 3D NumPy 배열.
@@ -403,12 +412,12 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         if self.volume_node is None:
             raise RuntimeError("활성 볼륨이 없습니다. 먼저 볼륨을 로드/선택하세요.")
         
-        self.segmentation(filetype='nifti', roi_organs=['spleen','liver'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
+        self.segmentation(filetype='nifti', roi_organs=['spleen'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
 
     # segmentation_mask를 가지고 3D slicer에 올려서 시각화해주는 코드
     def showSegmentation(self, segmentation_mask, improve_previous=False):
         if self.allSegmentsNode is None:
-            self.allSegmentsNode = slicer.mrmlScene.AddNewNoshowSegmentationdeByClass("vtkMRMLSegmentationNode")
+            self.allSegmentsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
 
         current_seg_group = self.allSegmentsNode
         current_seg_group.SetReferenceImageGeometryParameterFromVolumeNode(self.volume_node)
@@ -461,7 +470,12 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         # 넘파이 배열 넣기 (Slicer 기대 형상: KJI = (slices, rows, cols) = (Z,Y,X))
         #이거 totalsegmentator에 넣는 이미지
-        slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
+        if self.norm_b:
+            print("정규화 된 상태로 Totalsegmentator실행중")
+            slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
+        else:
+            print("정규화 안된 상태로 Totalsegmentator실행중")
+            slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
 
         # 부모 트랜스폼이 걸려 있다면 하든(harden)해서 좌표를 고정
         if outNode.GetParentTransformNode():
@@ -585,6 +599,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                     raise RuntimeError("마스크/참조 볼륨 그리드 불일치 — 서버에서 리샘플 필요")
 
                 # 여기서 Totalsegmentator로 한 분할결과 .npz파일로 저장
+                slice_idx, zrange, boxes_3D = self.get_bounding_info_from_labels(mask_for_slicer)
+                self.create3DBBoxROI(self.volume_node, boxes_3D, zrange)
                 self.showSegmentation(mask_for_slicer)
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 save_path = os.path.join(script_dir, "TotalSegmentator_mask_result.npz")
@@ -649,6 +665,58 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             f.write(response.content)
         
         job_event.set()
+    
+
+    def create3DBBoxROI(self, volumeNode, bboxes, zrange):
+        """
+        volumeNode: CT 볼륨 (vtkMRMLScalarVolumeNode)
+        bboxes: [[x_min, y_min, x_max, y_max], ...] 여러 개 가능
+        zrange: [z_min, z_max] (slice index, IJK z축 기준)
+        """
+        roi_nodes = []
+        print(f"bboxes:{bboxes}")
+
+        bbox = np.squeeze(bboxes, axis = 1)
+        i_min, j_min, i_max, j_max = bbox[zrange[0]]
+        k_min, k_max = zrange
+
+        corners_ijk = np.array([
+            [i_min, j_min, k_min],
+            [i_max, j_max, k_max]
+        ])
+
+        # --- IJK → RAS ---
+        ijkToRas = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(ijkToRas)
+        ijkToRas_np = slicer.util.arrayFromVTKMatrix(ijkToRas)
+
+        corners_ras = []
+        for corner in corners_ijk:
+            pt = np.array([corner[0], corner[1], corner[2], 1.0])
+            ras = ijkToRas_np @ pt
+            corners_ras.append(ras[:3])
+        corners_ras = np.array(corners_ras)
+
+        # --- 중심, 크기 계산 ---
+        center_ras = (corners_ras[0] + corners_ras[1]) / 2.0
+        size_ras = np.abs(corners_ras[1] - corners_ras[0])
+
+
+
+        # ROI 노드 생성
+        roiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", f"BBoxROI")
+        roiNode.SetXYZ(*center_ras)
+        roiNode.SetRadiusXYZ(*(size_ras / 2.0))
+
+        # Display 속성
+        roiNode.GetDisplayNode().SetVisibility(True)    # ROI 전체 표시
+        roiNode.GetDisplayNode().SetVisibility3D(True)  # 3D에 표시
+        roiNode.GetDisplayNode().SetVisibility2D(True)  # 2D Slice 뷰에도 표시
+        print(f"✅ ROI 생성 완료: center={center_ras}, size={size_ras}")
+
+        roi_nodes.append(roiNode)
+
+        return roi_nodes
 
 
     # MedSAM2로 분할하는 함수
@@ -662,6 +730,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         print(f"result shape: {result.shape}")
         print(f"result shape: {np.unique(result)}")
         slice_idx, zrange, boxes_3D = self.get_bounding_info_from_labels(result)
+        self.create3DBBoxROI(self.volume_node, boxes_3D, zrange)
         print(f"bboxes: {boxes_3D}")
         print(f"zrange: {zrange}")
         print(f"slice_idx: {slice_idx}")
@@ -851,3 +920,70 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         # 안전 클램핑
         k = max(0, min(k, self.image_data.shape[0] - 1))
         return k
+    
+    
+
+    # 이거 일단 사용 보류
+    def showGroundTruth(self, gt_folder):
+        """
+        gt_folder 안의 PNG 마스크 스택을 불러와서
+        CT(self.volume_node) geometry에 맞게 리샘플한 뒤 Segmentation으로 시각화
+        """
+        import os, glob, numpy as np, SimpleITK as sitk, sitkUtils, time
+
+        # --- 1. PNG 파일 정렬 ---
+        png_files = sorted(glob.glob(os.path.join(gt_folder, "*.png")), reverse=True)
+        if not png_files:
+            print(f"❌ GT 폴더에 PNG 없음: {gt_folder}")
+            return
+        print(f"📂 PNG 파일 개수: {len(png_files)}")
+
+        # --- 2. PNG → 3D SITK Image ---
+        slices = [sitk.ReadImage(f) for f in png_files]
+        img3d = sitk.JoinSeries(slices)                 # (x,y,z) stack
+        gt_img = sitk.Cast(img3d > 0, sitk.sitkUInt16)  # binary mask
+        gt_img = sitk.Multiply(gt_img, 999)             # 라벨값 999
+
+        # --- 3. Reference CT 가져오기 (geometry 완벽히 포함) ---
+        if self.volume_node is None:
+            slicer.util.errorDisplay("❌ self.volume_node 없음 (CT 볼륨 필요)")
+            return
+        ref_img = sitkUtils.PullVolumeFromSlicer(self.volume_node)  # CT geometry 그대로
+
+        # --- 4. GT를 CT geometry에 맞게 리샘플 ---
+        resampled_gt = sitk.Resample(
+            gt_img,
+            ref_img,                        # Reference = CT
+            sitk.Transform(),
+            sitk.sitkNearestNeighbor,       # 라벨 보간
+            0,
+            sitk.sitkUInt16
+        )
+        gt_array = sitk.GetArrayFromImage(resampled_gt).astype(np.int16)
+        print("GT shape(after resample):", gt_array.shape, "unique:", np.unique(gt_array))
+
+        # --- 5. npz 저장 (상위 폴더에 저장) ---
+        parent_folder = os.path.dirname(os.path.abspath(gt_folder))
+        save_path = os.path.join(parent_folder, "gt_np.npz")
+        np.savez(save_path, segs=gt_array)
+        print(f"✅ GT npz 저장 완료: {save_path}")
+
+        # --- 6. LabelMap 노드 생성 ---
+        gt_seg_label = f"GT_{int(time.time())}"
+        gt_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", gt_seg_label)
+        slicer.util.updateVolumeFromArray(gt_volume, gt_array)
+
+        # 📌 CT geometry 복사 (추가 안전장치)
+        gt_volume.CopyOrientation(self.volume_node)
+        gt_volume.SetOrigin(self.volume_node.GetOrigin())
+        gt_volume.SetSpacing(self.volume_node.GetSpacing())
+
+        # --- 7. Segmentation Node로 Import ---
+        if self.allSegmentsNode is None:
+            self.allSegmentsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+
+        self.allSegmentsNode.SetReferenceImageGeometryParameterFromVolumeNode(self.volume_node)
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(gt_volume, self.allSegmentsNode)
+
+        print("✅ GT 시각화 완료 (CT geometry 정렬)")
+
