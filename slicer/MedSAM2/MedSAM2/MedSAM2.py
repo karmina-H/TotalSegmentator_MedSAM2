@@ -179,7 +179,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         
         # Buttons
-        self.ui.btnROI.connect("clicked(bool)", lambda: self.logic.norm_btn) # 정규화버튼
+        self.ui.btnROI.connect("clicked(bool)", self.logic.norm_btn) # 정규화버튼
         self.ui.btnEnd.connect("clicked(bool)", self.logic.run_TotalSegmentator)
         self.ui.btnRefine.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnSegment.connect("clicked(bool)", self.logic.segment)
@@ -325,7 +325,11 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.image_data = slicer.util.arrayFromVolume(self.volume_node)  ################ Only one node?
     
     def norm_btn(self):
-        self.norm_b = True
+        self.norm_b = not self.norm_b 
+        if self.norm_b is True:
+            print("정규화 된상태!")
+        else:
+            print("정규화 안된상태!")
 
     # background에서 분할하는 서버왔다갔다하는거
     def run_on_background(self, target, args, title):
@@ -986,4 +990,3 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(gt_volume, self.allSegmentsNode)
 
         print("✅ GT 시각화 완료 (CT geometry 정렬)")
-
