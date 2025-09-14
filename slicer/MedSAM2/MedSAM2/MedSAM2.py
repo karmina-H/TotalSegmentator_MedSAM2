@@ -614,6 +614,14 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 np.savez(save_path, segs=mask_for_slicer)
                 print(f"여기서 시작이야(분할한거)! TotalSegmentator_mask_result: {self.Total_segmentator_mask_path}")
 
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))  # 현재 실행 파일(.py) 경로
+            gt_folder = os.path.join(script_dir, "Mask_spleen2")
+
+            self.showGTFromFolder(gt_folder)
+
+            #self.showGTFromFolder('Mask_spleen2',reverse = True)
+        
         except Exception as e:
             logging.error("예외 발생:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
@@ -923,6 +931,148 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         return config, checkpoint
     
+    def showGTFromFolder(self, gt_folder: str, reverse: bool = True, keep_labelmap_node: bool = False):
+        """
+        gt_folder 안의 PNG 스택을 읽어 기준 볼륨(self.volume_node)에 정확히 오버레이합니다.
+        - reverse: True면 슬라이스 순서를 뒤집어서 스택 결합
+        - keep_labelmap_node: True면 임시 LabelMap 노드를 남겨둠(디버깅 용)
+        """
+        import os, re, glob, numpy as np
+        import SimpleITK as sitk
+        try:
+            import sitkUtils  # Slicer 런타임에서 제공
+        except Exception:
+            sitkUtils = None
+
+        try:
+            # 0) 기준 볼륨 확인
+            if self.volume_node is None:
+                self.captureImage()
+            if self.volume_node is None:
+                slicer.util.errorDisplay("활성 볼륨을 찾을 수 없습니다. 먼저 CT/MR 볼륨을 불러오세요.", windowTitle="MedSAM2")
+                return None
+
+            '''
+            # 0-1) 상대 경로면 현재 .py 파일 기준으로 절대 경로 보정
+            if not os.path.isabs(gt_folder):
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                gt_folder = os.path.join(script_dir, gt_folder)
+            gt_folder = os.path.abspath(gt_folder).rstrip("\\/")
+            '''
+
+            # 1) 폴더 내 PNG 수집 (대/소문자 모두)
+            files = glob.glob(os.path.join(gt_folder, "*.png"))
+            #files += glob.glob(os.path.join(gt_folder, "*.PNG"))
+            if not files:
+                slicer.util.errorDisplay(f"폴더에 PNG 파일이 없습니다:\n{gt_folder}", windowTitle="MedSAM2")
+                return None
+
+            # 파일명 안 숫자 기준 정렬
+            def _last_int_in_name(p):
+                m = re.findall(r"\d+", os.path.basename(p))
+                return int(m[-1]) if m else 10**12  # 숫자 없으면 뒤로
+            files = sorted(files, key=_last_int_in_name)
+            if reverse:
+                files = list(reversed(files))
+
+            # 2) PNG → SITK 스택 (라벨)
+            slices = [sitk.ReadImage(f) for f in files]
+            # 컬러 PNG면 채널 하나 선택
+            if slices[0].GetNumberOfComponentsPerPixel() > 1:
+                slices = [sitk.VectorIndexSelectionCast(s, 0) for s in slices]
+            gt_img = sitk.JoinSeries(slices)  # (x,y,z)
+
+            
+
+            # 이진/다중 레이블 판정
+            arr_probe = sitk.GetArrayFromImage(gt_img)  # (z,y,x)
+            uniq = np.unique(arr_probe)
+            is_binary_like = np.all(np.isin(uniq, [0, 1, 255])) or len(uniq) <= 3
+            if is_binary_like:
+                gt_img = sitk.Cast(gt_img > 0, sitk.sitkUInt16)   # 0/1
+                print("png가 0,255로 되어있는데이터")
+            else:
+                gt_img = sitk.Cast(gt_img, sitk.sitkUInt16)       # 레이블 유지
+            
+            print("PNG uniq values:", uniq[:20])
+            print("Shape:", arr_probe.shape, "dtype:", arr_probe.dtype)
+
+
+            # 3) 기준 볼륨 geometry로 정렬
+            if sitkUtils is None:
+                slicer.util.errorDisplay("sitkUtils 모듈을 불러올 수 없습니다. Slicer에서 실행 중인지 확인하세요.", windowTitle="MedSAM2")
+                return None
+            ref_img = sitkUtils.PullVolumeFromSlicer(self.volume_node)
+
+            if list(gt_img.GetSize()) == list(ref_img.GetSize()):
+                gt_img.CopyInformation(ref_img)
+                resampled_gt = gt_img
+            else:
+                resampled_gt = sitk.Resample(
+                    gt_img,
+                    ref_img,
+                    sitk.Transform(),             # identity
+                    sitk.sitkNearestNeighbor,     # 라벨 보간
+                    0,
+                    sitk.sitkUInt16
+                )
+
+            # 4) LabelMap 노드로 푸시 → Segmentation으로 import
+            label_name = f"GT_Label_{os.path.basename(gt_folder)}"
+            labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", label_name)
+            sitkUtils.PushVolumeToSlicer(resampled_gt, labelNode)
+
+            # 기준 볼륨과 동일한 트랜스폼 계층 유지 (★ 여기 수정점)
+            parentTx = self.volume_node.GetParentTransformNode()
+            if parentTx:
+                labelNode.SetAndObserveTransformNodeID(parentTx.GetID())
+
+            if self.allSegmentsNode is None:
+                self.allSegmentsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "GT_Segmentation")
+            segNode = self.allSegmentsNode
+            segNode.SetReferenceImageGeometryParameterFromVolumeNode(self.volume_node)
+
+            if parentTx:
+                segNode.SetAndObserveTransformNodeID(parentTx.GetID())
+
+            slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelNode, segNode)
+
+            # 5) 표시(오버레이) 설정
+            if not segNode.GetDisplayNode():
+                segNode.CreateDefaultDisplayNodes()
+            disp = segNode.GetDisplayNode()
+            if disp:
+                # 2D 표시
+                if hasattr(disp, "SetVisibility2DFill"):
+                    disp.SetVisibility2DFill(True)
+                if hasattr(disp, "SetVisibility2DOutline"):
+                    disp.SetVisibility2DOutline(True)
+                if hasattr(disp, "SetOpacity2D"):
+                    disp.SetOpacity2D(0.5)
+
+            # 배경에 원본 볼륨 활성화 및 뷰 리셋
+            appLogic = slicer.app.applicationLogic()
+            selNode = appLogic.GetSelectionNode()
+            selNode.SetActiveVolumeID(self.volume_node.GetID())
+            appLogic.PropagateVolumeSelection()
+            slicer.util.resetSliceViews()
+
+            # 임시 LabelMap 정리
+            if not keep_labelmap_node:
+                slicer.mrmlScene.RemoveNode(labelNode)
+
+            # 피드백
+            nz = int(np.count_nonzero(sitk.GetArrayFromImage(resampled_gt)))
+            print(f"✅ GT 시각화 완료\n- 폴더: {gt_folder}\n- 슬라이스: {len(files)}\n- 비영값 픽셀: {nz:,}\n- 다중 레이블: {not is_binary_like}")
+            return segNode
+
+        except Exception as e:
+            import traceback
+            slicer.util.errorDisplay(
+                "GT 시각화 중 오류가 발생했습니다:\n" + "".join(traceback.format_exception_only(type(e), e)),
+                windowTitle="MedSAM2"
+            )
+            return None
 
     # 현재 보고있는 슬라이스의 인덱스를 반환하는 함수
     def getCurrentSliceKIndex(self, viewName="Red"):
@@ -956,67 +1106,3 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         return k
     
     
-
-    # 이거 일단 사용 보류
-    def showGroundTruth(self, gt_folder):
-        """
-        gt_folder 안의 PNG 마스크 스택을 불러와서
-        CT(self.volume_node) geometry에 맞게 리샘플한 뒤 Segmentation으로 시각화
-        """
-        import os, glob, numpy as np, SimpleITK as sitk, sitkUtils, time
-
-        # --- 1. PNG 파일 정렬 ---
-        png_files = sorted(glob.glob(os.path.join(gt_folder, "*.png")), reverse=True)
-        if not png_files:
-            print(f"❌ GT 폴더에 PNG 없음: {gt_folder}")
-            return
-        print(f"📂 PNG 파일 개수: {len(png_files)}")
-
-        # --- 2. PNG → 3D SITK Image ---
-        slices = [sitk.ReadImage(f) for f in png_files]
-        img3d = sitk.JoinSeries(slices)                 # (x,y,z) stack
-        gt_img = sitk.Cast(img3d > 0, sitk.sitkUInt16)  # binary mask
-        gt_img = sitk.Multiply(gt_img, 999)             # 라벨값 999
-
-        # --- 3. Reference CT 가져오기 (geometry 완벽히 포함) ---
-        if self.volume_node is None:
-            slicer.util.errorDisplay("❌ self.volume_node 없음 (CT 볼륨 필요)")
-            return
-        ref_img = sitkUtils.PullVolumeFromSlicer(self.volume_node)  # CT geometry 그대로
-
-        # --- 4. GT를 CT geometry에 맞게 리샘플 ---
-        resampled_gt = sitk.Resample(
-            gt_img,
-            ref_img,                        # Reference = CT
-            sitk.Transform(),
-            sitk.sitkNearestNeighbor,       # 라벨 보간
-            0,
-            sitk.sitkUInt16
-        )
-        gt_array = sitk.GetArrayFromImage(resampled_gt).astype(np.int16)
-        print("GT shape(after resample):", gt_array.shape, "unique:", np.unique(gt_array))
-
-        # --- 5. npz 저장 (상위 폴더에 저장) ---
-        parent_folder = os.path.dirname(os.path.abspath(gt_folder))
-        save_path = os.path.join(parent_folder, "gt_np.npz")
-        np.savez(save_path, segs=gt_array)
-        print(f"✅ GT npz 저장 완료: {save_path}")
-
-        # --- 6. LabelMap 노드 생성 ---
-        gt_seg_label = f"GT_{int(time.time())}"
-        gt_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", gt_seg_label)
-        slicer.util.updateVolumeFromArray(gt_volume, gt_array)
-
-        # 📌 CT geometry 복사 (추가 안전장치)
-        gt_volume.CopyOrientation(self.volume_node)
-        gt_volume.SetOrigin(self.volume_node.GetOrigin())
-        gt_volume.SetSpacing(self.volume_node.GetSpacing())
-
-        # --- 7. Segmentation Node로 Import ---
-        if self.allSegmentsNode is None:
-            self.allSegmentsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-
-        self.allSegmentsNode.SetReferenceImageGeometryParameterFromVolumeNode(self.volume_node)
-        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(gt_volume, self.allSegmentsNode)
-
-        print("✅ GT 시각화 완료 (CT geometry 정렬)")
