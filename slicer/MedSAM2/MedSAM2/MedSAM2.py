@@ -297,6 +297,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     cachedBoundaries = None
     lastSegmentLabel = None
     Total_segmentator_mask_path = None
+    Medsam2_segmentator_mask_path = None
 
     # 선택한 slice 인덱스
     slice_idx_override = None
@@ -665,6 +666,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         response = requests.get(download_file_url, data={'output': 'data/video/segs_tiny/%s'%os.path.basename(img_path)})
 
+        print(f"결과 path = {result_path}")
         with open(result_path, 'wb') as f: #TODO: arbitrary file name
             f.write(response.content)
         
@@ -726,9 +728,16 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     # MedSAM2로 분할하는 함수
     def segment(self):
         self.captureImage()
+        result = None
         # segment할 슬라이스인덱스, 경계박스, z범위
-        data = np.load(self.Total_segmentator_mask_path)
-        result = data['segs']
+        if self.Medsam2_segmentator_mask_path is None:
+            with np.load(self.Total_segmentator_mask_path) as data:
+                result = data['segs'].copy()
+        else:
+            with np.load(self.Medsam2_segmentator_mask_path) as data:
+                result = data['segs'].copy()
+
+        #result = data['segs']
         result = result.astype(np.int16)
         print("Total로 분할된 결과 크기 및 라벨 unique:")
         print(f"result shape: {result.shape}")
@@ -740,33 +749,54 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         print(f"slice_idx: {slice_idx}")
 
 
-
+        temp_result = None
         with tempfile.TemporaryDirectory() as tmpdirname:
             print("Min:", self.image_data_norm.min(), "Max:", self.image_data_norm.max())
             img_path = "%s\img_data.npz"%(tmpdirname,)
             np.savez(img_path, imgs=self.image_data_norm, boxes=boxes_3D, z_range=[*zrange, slice_idx])
             gts_path = '%s\gts.npz'%(tmpdirname,)
             result_path = '%s\\result.npz'%(tmpdirname,)
+            
             temp_seg = self.getSegmentationArray(self.allSegmentsNode)
+
             if not np.array_equal(result, temp_seg):
                 print("A와 C는 하나라도 요소가 다릅니다.")
+                diff = (result != temp_seg)
+                slice_has_idff = np.any(diff, axis=(1,2))
+                selected_slices = temp_seg*slice_has_idff[:,np.newaxis,np.newaxis]
+                z_index = 0
+                for slice in selected_slices:
+                    if np.all(slice == 0):
+                        z_index += 1
+                    else:
+                        print(f"수정한 슬라이스 인덱스 : {z_index}")
+                        z_index += 1
+                np.savez_compressed(gts_path, segs=selected_slices)
             else:
                 print("A와 C는 완전히 같습니다.")
-            np.savez(gts_path, segs=temp_seg)
-            if self.Total_segmentator_mask_path:
-                np.savez(self.Total_segmentator_mask_path, segs=temp_seg)
+                np.savez_compressed(gts_path, segs=result)
+
+
+
+            
+            # if self.Total_segmentator_mask_path:
+            #     np.savez(self.Total_segmentator_mask_path, segs=temp_seg)
             self.run_on_background(self.segment_helper, (img_path, gts_path, result_path, self.widget.ui.txtIP.text.strip(), self.widget.ui.txtPort.text.strip()), 'Segmenting...')
 
             # loading results
             segmentation_mask = np.load(result_path, allow_pickle=True)['segs']
+            print(f"서버 결과 크기 :{segmentation_mask.shape}")
             print(f"final_segmentation_mask: {np.unique(segmentation_mask)}")
-            print(f"result_path!!: {result_path}")
+            #print(f"result_path!!: {result_path}")
             self.showSegmentation(segmentation_mask)
-
+            temp_result = segmentation_mask.copy()
             # caching box info for possible "segmentation improvement"
             self.cachedBoundaries = {'bboxes': boxes_3D, 'zrange': zrange}
 
             self.widget.ui.CollapsibleButton_5.setVisible(True)
+
+        self.Medsam2_segmentator_mask_path = 'Medsam2_segmentator_mask.npz'
+        np.savez_compressed(self.Medsam2_segmentator_mask_path, segs=temp_result)
 
         roiNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsROINode')
         for roiNode in roiNodes:
