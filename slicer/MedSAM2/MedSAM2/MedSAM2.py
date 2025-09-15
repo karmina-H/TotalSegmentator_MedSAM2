@@ -620,7 +620,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
             self.showGTFromFolder(gt_folder)
 
-            #self.showGTFromFolder('Mask_spleen2',reverse = True)
+
         
         except Exception as e:
             logging.error("예외 발생:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
@@ -980,14 +980,18 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             # 컬러 PNG면 채널 하나 선택
             if slices[0].GetNumberOfComponentsPerPixel() > 1:
                 slices = [sitk.VectorIndexSelectionCast(s, 0) for s in slices]
+            # 각 슬라이스를 합쳐서 3차원배열로
             gt_img = sitk.JoinSeries(slices)  # (x,y,z)
 
             
 
             # 이진/다중 레이블 판정
+            # 넘파이 배열로 변환하고
             arr_probe = sitk.GetArrayFromImage(gt_img)  # (z,y,x)
+            # 라벨파악
             uniq = np.unique(arr_probe)
             is_binary_like = np.all(np.isin(uniq, [0, 1, 255])) or len(uniq) <= 3
+            # 이진이면 0,1로 변환
             if is_binary_like:
                 gt_img = sitk.Cast(gt_img > 0, sitk.sitkUInt16)   # 0/1
                 print("png가 0,255로 되어있는데이터")
@@ -1002,12 +1006,16 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             if sitkUtils is None:
                 slicer.util.errorDisplay("sitkUtils 모듈을 불러올 수 없습니다. Slicer에서 실행 중인지 확인하세요.", windowTitle="MedSAM2")
                 return None
+            # volume_node을 SITK이미지로 가져오고
             ref_img = sitkUtils.PullVolumeFromSlicer(self.volume_node)
 
+            # 크기가 같으면 GEOMETRY만 복사
             if list(gt_img.GetSize()) == list(ref_img.GetSize()):
                 gt_img.CopyInformation(ref_img)
                 resampled_gt = gt_img
+            # 아니면 크기 보간해줌
             else:
+                print("크기가 맞지않아 보간합니다(정확하지 않음)")
                 resampled_gt = sitk.Resample(
                     gt_img,
                     ref_img,
@@ -1017,6 +1025,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                     sitk.sitkUInt16
                 )
 
+            
             # 4) LabelMap 노드로 푸시 → Segmentation으로 import
             label_name = f"GT_Label_{os.path.basename(gt_folder)}"
             labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", label_name)
