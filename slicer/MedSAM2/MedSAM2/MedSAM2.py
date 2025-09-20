@@ -2,9 +2,12 @@ import logging
 import os
 from typing import Annotated, Optional
 import traceback
-
-
+import random
+from skimage.segmentation import flood
+from skimage.morphology import diamond
 import vtk
+import gc, time
+import cv2  
 
 import slicer
 from slicer.i18n import tr as _
@@ -15,6 +18,8 @@ from slicer.parameterNodeWrapper import (
     parameterNodeWrapper,
     WithinRange,
 )
+
+
 
 from slicer import vtkMRMLScalarVolumeNode
 
@@ -178,7 +183,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.btnRefine3D.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnAddPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='addition'))
         self.ui.btnSubtractPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='subtraction'))
-        self.ui.btnMiddleSlice.connect("clicked(bool)", lambda: self.logic.showGT(prefix='Mask_spleen2')) # 이거 GT데이터 보여주는 버튼
+        self.ui.btnMiddleSlice.connect("clicked(bool)", self.logic.showGT) # 이거 GT데이터 보여주는 버튼
 
         self.ui.btnEnd.setVisible(False)
         self.ui.CollapsibleButton_5.setVisible(False)
@@ -295,8 +300,9 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
     def getParameterNode(self):
         return MedSAM2ParameterNode(super().getParameterNode())
-    
-    # 현재 3D slicer에 올라와있는 이미지로 image_data에 저장하는 함수
+
+
+    # # 현재 3D slicer에 올라와있는 이미지로 image_data에 저장하는 함수
     def captureImage(self):
         self.volume_node = slicer.util.getNodesByClass('vtkMRMLScalarVolumeNode')[0]
         if self.volume_node.GetNodeTagName() == 'LabelMapVolume': ### some volumes are loaded as LabelMapVolume instead of ScalarVolume, temporary
@@ -310,7 +316,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             appLogic.PropagateVolumeSelection()
             self.volume_node = sef
 
-        self.image_data = slicer.util.arrayFromVolume(self.volume_node)  ################ Only one node?
+        self.image_data = slicer.util.arrayFromVolume(self.volume_node).astype(np.int16)  ################ Only one node?
+        print(f"  HU min/max: {self.image_data.min()} / {self.image_data.max()}")
     
     def norm_btn(self):
         self.norm_b = not self.norm_b 
@@ -348,6 +355,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 - zrange (list): [z_min, z_max] 형태의 Z축 범위 리스트
                 0이 아닌 레이블이 없으면 (None, [], [])를 반환
         """
+
         coords = np.where(gst > 0)
         
         if coords[0].size == 0:
@@ -387,7 +395,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         if self.volume_node is None:
             raise RuntimeError("활성 볼륨이 없습니다. 먼저 볼륨을 로드/선택하세요.")
         
-        self.segmentation(filetype='nifti', roi_organs=['spleen'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
+        self.segmentation(filetype='nifti', roi_organs=['liver'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
 
     # segmentation_mask를 가지고 3D slicer에 올려서 시각화해주는 코드
     def showSegmentation(self, segmentation_mask,name, improve_previous=False):
@@ -407,7 +415,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             segment_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", new_seg_label)
             slicer.util.updateVolumeFromArray(segment_volume, curr_object)
 
-            slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(segment_volume, current_seg_group)
+            # slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(segment_volume, current_seg_group)
             slicer.util.updateSegmentBinaryLabelmapFromArray(curr_object, current_seg_group, segment_volume.GetName(), self.volume_node)
 
         if improve_previous:
@@ -439,19 +447,38 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         if self.norm_b:
             print("정규화 된 상태로 Totalsegmentator실행중")
+            slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            hu_output_path = f"/path_Temp/hu_result_{timestamp}.nii.gz"
+            slicer.util.saveNode(outNode, hu_output_path)
+
             slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            output_path = f"/path_Temp/result_{timestamp}.nii.gz"
+            slicer.util.saveNode(outNode, output_path)
+
+
+
         else:
             print("정규화 안된 상태로 Totalsegmentator실행중")
+            slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            output_path = f"/path_Temp/result_{timestamp}.nii.gz"
+            slicer.util.saveNode(outNode, output_path)
+
             slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            hu_output_path = f"/path_Temp/hu_result_{timestamp}.nii.gz"
+            slicer.util.saveNode(outNode, hu_output_path)
+
+        
+        slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
+        slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
 
         # 부모 트랜스폼이 걸려 있다면 하든(harden)해서 좌표를 고정
         if outNode.GetParentTransformNode():
             slicer.vtkSlicerTransformLogic().hardenTransform(outNode)
 
-        # NIfTI로 저장
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        output_path = f"/path_Temp/result_{timestamp}.nii.gz"
-        slicer.util.saveNode(outNode, output_path)
 
         # 데이터 서버로 보내주기
         SERVER_URL = 'http://%s:%s/Totalsegmentator'%(ip, port)
@@ -563,11 +590,13 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 print(f"TotalSegmentator_mask_result: {self.Total_segmentator_mask_path}")
 
             #MedSAM2 후보정 실행
-            self.segment()
+            result_mask = self.segment()
 
+            print(f"최종 결과 마스크 shape : {result_mask.shape}")
+            print(f"결과마스크 unique : {np.unique(result_mask)}")
 
             self.scroll_limit(zrange[0], zrange[1])
-            print(f"z_max: {zrange[1]}")
+            # print(f"z_max: {zrange[1]}")
 
         except Exception as e:
             logging.error("예외 발생:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
@@ -629,7 +658,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         zrange: [z_min, z_max] (slice index, IJK z축 기준)
         """
         roi_nodes = []
-        print(f"bboxes:{bboxes}")
+        # print(f"bboxes:{bboxes}")
 
         bbox = np.squeeze(bboxes, axis = 1)
         i_min, j_min, i_max, j_max = bbox[zrange[0]]
@@ -663,7 +692,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         # Display 속성
         roiNode.GetDisplayNode().SetVisibility(True)    # ROI 전체 표시
-        roiNode.GetDisplayNode().SetVisibility3D(True)  # 3D에 표시
+        # roiNode.GetDisplayNode().SetVisibility3D(True)  # 3D에 표시
         roiNode.GetDisplayNode().SetVisibility2D(True)  # 2D Slice 뷰에도 표시
 
         roi_nodes.append(roiNode)
@@ -676,9 +705,11 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         result = None
         # segment할 슬라이스인덱스, 경계박스, z범위
         if self.Medsam2_segmentator_mask_path is None:
+            print("inital medsam2")
             with np.load(self.Total_segmentator_mask_path) as data:
                 result = data['segs'].copy()
         else:
+            print("revised medsam2")
             with np.load(self.Medsam2_segmentator_mask_path) as data:
                 result = data['segs'].copy()
 
@@ -687,37 +718,51 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.create3DBBoxROI(self.volume_node, boxes_3D, zrange)
 
         temp_result = None
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            img_path = "%s\img_data.npz"%(tmpdirname,)
-            np.savez(img_path, imgs=self.image_data_norm, boxes=boxes_3D, z_range=[*zrange, slice_idx])
-            gts_path = '%s\gts.npz'%(tmpdirname,)
-            result_path = '%s\\result.npz'%(tmpdirname,)
-            
-            temp_seg = self.getSegmentationArray(self.allSegmentsNode)
 
-            if not np.array_equal(result, temp_seg):
-                diff = (result != temp_seg)
-                slice_has_idff = np.any(diff, axis=(1,2))
-                selected_slices = temp_seg*slice_has_idff[:,np.newaxis,np.newaxis]
-                z_index = 0
-                for slice in selected_slices:
-                    if np.all(slice == 0):
-                        z_index += 1
-                    else:
-                        z_index += 1
-                np.savez_compressed(gts_path, segs=selected_slices)
-            else:
-                np.savez_compressed(gts_path, segs=result)
+        base_dir = os.path.dirname(__file__)
+        
+        img_path = os.path.abspath(os.path.join(base_dir, 'img_data.npz'))
+        np.savez(img_path, imgs=self.image_data_norm, boxes=boxes_3D, z_range=[*zrange, slice_idx])
+        gts_path = os.path.abspath(os.path.join(base_dir, 'gts.npz'))
+        result_path = os.path.abspath(os.path.join(base_dir,"result.npz"))
 
-            self.run_on_background(self.segment_helper, (img_path, gts_path, result_path, self.widget.ui.txtIP.text.strip(), self.widget.ui.txtPort.text.strip()), 'Segmenting...')
+        print("------------- 파일들 저장 경로 -----------")
+        print(img_path)
+        print(gts_path)
+        print(result_path)
 
-            # loading results
-            segmentation_mask = np.load(result_path, allow_pickle=True)['segs']
-            self.showSegmentation(segmentation_mask,f'medsam2_{self.medsam2_index}')
-            self.medsam2_index += 1
-            temp_result = segmentation_mask.copy()
-            self.cachedBoundaries = {'bboxes': boxes_3D, 'zrange': zrange}
-            self.widget.ui.CollapsibleButton_5.setVisible(True)
+        temp_seg = self.getSegmentationArray(self.allSegmentsNode)
+
+        if not np.array_equal(result, temp_seg):
+            print('두 개가 다름')
+            diff = (result != temp_seg)
+            slice_has_idff = np.any(diff, axis=(1,2))
+            selected_slices = temp_seg*slice_has_idff[:,np.newaxis,np.newaxis]
+            z_index = 0
+            for slice in selected_slices:
+                if np.all(slice == 0):
+                    z_index += 1
+                else:
+                    z_index += 1
+            np.savez_compressed(gts_path, segs=selected_slices)
+        else:
+            print('두 개가 같음')
+            np.savez_compressed(gts_path, segs=result)
+
+
+        self.run_on_background(self.segment_helper, (img_path, gts_path, result_path, self.widget.ui.txtIP.text.strip(), self.widget.ui.txtPort.text.strip()), 'Segmenting...')
+
+        segmentation_mask = np.load(result_path)
+        segs = segmentation_mask['segs'].copy()
+        segmentation_mask.close()
+
+        print(f"result_shape : {segs.shape}")
+        print(f"segs_unique : {np.unique(segs)}")
+        self.showSegmentation(segs,f'medsam2_{self.medsam2_index}')
+        self.medsam2_index += 1
+        temp_result = segs
+        self.cachedBoundaries = {'bboxes': boxes_3D, 'zrange': zrange}
+        self.widget.ui.CollapsibleButton_5.setVisible(True)
 
         self.Medsam2_segmentator_mask_path = 'Medsam2_segmentator_mask.npz'
         np.savez_compressed(self.Medsam2_segmentator_mask_path, segs=temp_result)
@@ -726,6 +771,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         for roiNode in roiNodes:
             slicer.mrmlScene.RemoveNode(roiNode)
         self.boundaries = None
+
+        return temp_result
     
 
     # 현재 3D slicer에 올라와있는 분할된 마스크를 가지고 넘파이배열로 만들어서 return하는 함수
@@ -757,7 +804,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 result[segArray > 0] = orig_label
 
         uniq, cnt = np.unique(result, return_counts=True)
-        print("[getSegmentationArray] labels:", {int(u): int(c) for u, c in zip(uniq, cnt)})
+        # print("[getSegmentationArray] labels:", {int(u): int(c) for u, c in zip(uniq, cnt)})
 
         return result
 
@@ -769,9 +816,11 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     def preprocess_CT(self, win_level=40.0, win_width=400.0):
         self.captureImage()
 
+        img = np.copy(self.image_data)
+
+        print(f"preproces함수에서의 min_max: {self.image_data.min()}  , {self.image_data.max()}")
         self.image_data_hu = np.copy(self.image_data)
 
-        img = np.copy(self.image_data)
         lower_bound, upper_bound = win_level - win_width/2, win_level + win_width/2
         image_data_pre = np.clip(img, lower_bound, upper_bound)
         image_data_pre = (image_data_pre - np.min(image_data_pre))/(np.max(image_data_pre)-np.min(image_data_pre))*255.0
@@ -781,6 +830,8 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.volume_node.GetDisplayNode().SetWindowLevelMinMax(0, 255)
 
         self.image_data_norm = image_data_pre
+
+        print(f"norm_min : {np.min(self.image_data_norm)}  norm_max : {np.max(self.image_data_norm)}")
         
         return image_data_pre
     
@@ -793,6 +844,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         img = np.copy(self.image_data)
         lower_bound, upper_bound = np.percentile(img[img > 0], lower_percent), np.percentile(img[img > 0], upper_percent)
         image_data_pre = np.clip(self.img, lower_bound, upper_bound)
+        self.image_data_hu = np.copy(image_data_pre)
         image_data_pre = (image_data_pre - np.min(image_data_pre))/(np.max(image_data_pre)-np.min(image_data_pre))*255.0
         image_data_pre = np.uint8(image_data_pre)
 
@@ -841,38 +893,76 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         return config, checkpoint
     
+
     def scroll_limit(self, z_min, z_max):
-        # 좌표 변환
-        spacing = self.volume_node.GetSpacing()
-        origin = self.volume_node.GetOrigin()
-        extent = self.volume_node.GetImageData().GetExtent()
+        """
+        Red Slice 뷰 스크롤을 원본 볼륨 위에서 z_min~z_max 범위로 제한
+        """
+        import slicer, vtk
+
+        volumeNode = self.volume_node
+        spacing = volumeNode.GetSpacing()
+        origin = volumeNode.GetOrigin()
+        extent = volumeNode.GetImageData().GetExtent()
 
         zCoordMin = origin[2] + (extent[4] + z_min) * spacing[2]
         zCoordMax = origin[2] + (extent[4] + z_max) * spacing[2]
 
-        # Red slice node
         redSliceNode = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
 
-        # 제한 함수
         def lockRedSliceRange(caller, event):
             offset = redSliceNode.GetSliceOffset()
+            # ✅ 값이 변할 필요가 있을 때만 Set → 무한 루프 방지
             if offset < zCoordMin:
-                redSliceNode.SetSliceOffset(zCoordMin)
+                if offset != zCoordMin:
+                    redSliceNode.SetSliceOffset(zCoordMin)
             elif offset > zCoordMax:
-                redSliceNode.SetSliceOffset(zCoordMax)
+                if offset != zCoordMax:
+                    redSliceNode.SetSliceOffset(zCoordMax)
 
-        # 옵저버 연결 (여기서 핵심은 vtk.vtkCommand.ModifiedEvent 사용)
+        # 옵저버 등록
         redSliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent, lockRedSliceRange)
 
-        # 시작을 z_min으로 맞추기
+        # 시작을 z_min 위치로 맞춤
         redSliceNode.SetSliceOffset(zCoordMin)
 
-        print(f"✅ Red 뷰는 이제 {z_min}~{z_max} 슬라이스 범위에서만 스크롤 가능합니다.")
+        print(f"✅ Red Slice 뷰는 이제 {z_min}~{z_max} 범위에서만 스크롤 가능합니다.")
+
+
+    
+    # def scroll_limit_past(self, z_min, z_max):
+    #     # 좌표 변환
+    #     spacing = self.volume_node.GetSpacing()
+    #     origin = self.volume_node.GetOrigin()
+    #     extent = self.volume_node.GetImageData().GetExtent()
+
+    #     zCoordMin = origin[2] + (extent[4] + z_min) * spacing[2]
+    #     zCoordMax = origin[2] + (extent[4] + z_max) * spacing[2]
+
+    #     # Red slice node
+    #     redSliceNode = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
+
+    #     # 제한 함수
+    #     def lockRedSliceRange(caller, event):
+    #         offset = redSliceNode.GetSliceOffset()
+    #         if offset < zCoordMin:
+    #             redSliceNode.SetSliceOffset(zCoordMin)
+    #         elif offset > zCoordMax:
+    #             redSliceNode.SetSliceOffset(zCoordMax)
+
+    #     # 옵저버 연결 (여기서 핵심은 vtk.vtkCommand.ModifiedEvent 사용)
+    #     redSliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent, lockRedSliceRange)
+
+    #     # 시작을 z_min으로 맞추기
+    #     redSliceNode.SetSliceOffset(zCoordMin)
+
+    #     print(f"✅ Red 뷰는 이제 {z_min}~{z_max} 슬라이스 범위에서만 스크롤 가능합니다.")
     
     # GT데이터 시각화 관련 함수들
-    def showGT(self, folder_name):
+    def showGT(self):
         script_dir = os.path.dirname(os.path.abspath(__file__))  # 현재 실행 파일(.py) 경로
-        gt_folder = os.path.join(script_dir,folder_name)
+        gt_folder = os.path.join(script_dir,'Mask_Liver2')
+        print('gt loading...')
         self.showGTFromFolder(gt_folder)
     
     def showGTFromFolder(self, gt_folder: str, reverse: bool = True):
@@ -1003,3 +1093,5 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 windowTitle="MedSAM2"
             )
             return None
+
+
