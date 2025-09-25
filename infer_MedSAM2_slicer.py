@@ -64,6 +64,9 @@ def infer_3d(predictor, img_npz_file, gts_file, propagate, model_cfg, pred_save_
     z_range = npz_data['z_range'] # (z_min, z_max, slice_idx)
     gts = np.load(gts_file, 'r', allow_pickle=True)['segs'] if gts_file != 'X' else None
 
+    nonzero_slices = np.any(gts != 0, axis=(1,2))
+    print("0이 아닌 값이 있는 슬라이스 개수:", np.sum(nonzero_slices))
+
     print(f"[로드 완료] img_3D.shape={img_3D.shape}, boxes_3D.shape={boxes_3D.shape}, z_range={z_range}")
     if gts is not None:
         print(f"gts.shape={gts.shape}, gts unique={np.unique(gts)}")
@@ -110,6 +113,8 @@ def infer_3d(predictor, img_npz_file, gts_file, propagate, model_cfg, pred_save_
     # 메인 루프
     # =================================================================
     for idx, label in enumerate(labels, start=1):
+        if label == 0:
+            continue
         print(f"\n---- 라벨 {label} 처리 ----")
 
         gt = (gts == label) if gts is not None else np.zeros_like(img_3D[...,0], dtype=bool)
@@ -124,8 +129,9 @@ def infer_3d(predictor, img_npz_file, gts_file, propagate, model_cfg, pred_save_
         z_mid_orig = np.quantile(indices[0], 0.5).astype(int)
         print(f"z_mid_orig={z_mid_orig}")
 
-        z_min = np.min(indices[0]) if indices[0].size > 0 else 0
-        z_max = np.max(indices[0]) if indices[0].size > 0 else D-1
+        # z_min = np.min(indices[0]) if indices[0].size > 0 else 0
+        # z_max = np.max(indices[0]) if indices[0].size > 0 else D-1
+
         print(f"z_min={z_min}, z_max={z_max}")
 
         # 잘라낼 이미지 범위

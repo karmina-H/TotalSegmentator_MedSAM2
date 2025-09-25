@@ -2,12 +2,12 @@ import logging
 import os
 from typing import Annotated, Optional
 import traceback
-import random
-from skimage.segmentation import flood
-from skimage.morphology import diamond
 import vtk
-import gc, time
-import cv2  
+import time
+import numpy as np
+from scipy.ndimage import binary_dilation, binary_closing, binary_fill_holes, generate_binary_structure
+from skimage.segmentation import flood_fill
+
 
 import slicer
 from slicer.i18n import tr as _
@@ -39,9 +39,6 @@ import glob
 import re
 
 from totalsegmentator.python_api import totalsegmentator
-#
-# MedSAM2
-#
 
 
 class MedSAM2(ScriptedLoadableModule):
@@ -96,11 +93,7 @@ class MedSAM2ParameterNode:
     invertedVolume: vtkMRMLScalarVolumeNode
 
 
-#
-# MedSAM2Widget
-#
-
-
+# 3D slicer에서 UI 설정하는 부분
 class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Uses ScriptedLoadableModuleWidget base class, available at:
     https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
@@ -164,7 +157,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         from PythonQt.QtGui import QIcon
         iconsPath = os.path.join(os.path.dirname(__file__), 'Resources/Icons')
         self.ui.pbApplyPrep.setIcon(QIcon(os.path.join(iconsPath, 'verify.png')))
-        self.ui.btnStart.setText("Normalization")
+        #self.ui.btnStart.setText("Normalization")
         self.ui.btnROI.setText("Initial Segmentation")
         self.ui.btnSegment.setText("Refined Mask Propagation")
         
@@ -177,7 +170,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # Buttons
         self.ui.btnROI.connect("clicked(bool)", self.logic.run_TotalSegmentator) # 정규화버튼
-        self.ui.btnStart.connect("clicked(bool)", self.logic.norm_btn)
+        #self.ui.btnStart.connect("clicked(bool)", self.logic.norm_btn)
         self.ui.btnRefine.connect("clicked(bool)", self.logic.refineMiddleMask)
         self.ui.btnSegment.connect("clicked(bool)", self.logic.segment)
         self.ui.btnRefine3D.connect("clicked(bool)", self.logic.refineMiddleMask)
@@ -185,7 +178,8 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.btnSubtractPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='subtraction'))
         self.ui.btnMiddleSlice.connect("clicked(bool)", self.logic.showGT) # 이거 GT데이터 보여주는 버튼
 
-        self.ui.btnEnd.setVisible(False)
+        self.ui.btnStart.setVisible(False)    
+        self.ui.btnEnd.setVisible(False)    
         self.ui.CollapsibleButton_5.setVisible(False)
         self.ui.btnAddPoint.setVisible(False)
         self.ui.btnSubtractPoint.setVisible(False)
@@ -268,6 +262,8 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
 
 
+
+# MedSAM2 로직처리 관련클래스
 class MedSAM2Logic(ScriptedLoadableModuleLogic):
     """This class should implement all the actual
     computation done by your module.  The interface
@@ -277,9 +273,9 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     Uses ScriptedLoadableModuleLogic base class, available at:
     https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
     """
-    norm_b = False
+    
+    GT_folder_name = 'Mask_spleen2'
     image_data_hu = None
-    image_data_norm = None
     boundaries = None
     volume_node = None
     image_data = None
@@ -316,16 +312,10 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             appLogic.PropagateVolumeSelection()
             self.volume_node = sef
 
-        self.image_data = slicer.util.arrayFromVolume(self.volume_node).astype(np.int16)  ################ Only one node?
+        self.image_data = slicer.util.arrayFromVolume(self.volume_node).astype(np.int16) 
+        print(f"image_dtype: {self.image_data.dtype}")
         print(f"  HU min/max: {self.image_data.min()} / {self.image_data.max()}")
     
-    def norm_btn(self):
-        self.norm_b = not self.norm_b 
-        if self.norm_b is True:
-            print("정규화 된상태!")
-        else:
-            print("정규화 안된상태!")
-        
 
     def run_on_background(self, target, args, title):
         self.progressbar = slicer.util.createProgressDialog(autoClose=False)
@@ -342,20 +332,19 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         self.progressbar.close()
     
-    # Total segmentator로 1차분할한 결과에서 padding더해서 경계박스 만들어주는 함수 
-    def get_bounding_info_from_labels(self,gst, padding=3):
+    # Total segmentator로 1차분할한 결과를 받고 padding더해서 경계박스 만들어주는 함수 
+    def get_bounding_info_from_labels(self,gst, padding=0):
         """
         Args:
-            gst (np.ndarray): (depth, height, width) NumPy
-            padding (int)
+            gst - (z,y,x) NumPy
+            padding - int
         Returns:
             tuple: (slice_idx, bboxes, zrange)
                 - slice_idx (int): 경계 박스의 Z축 중심 인덱스.
-                - bboxes (list): [[x_min, y_min, x_max, y_max]] 형태의 2D 경계 박스 리스트
+                - boxes_3D (list): [[x_min, y_min, x_max, y_max]] 형태의 2D 경계 박스 리스트가 z축에 따라존재(depth,4) - 근데 모든 4는 똑같은 값을 가짐.
                 - zrange (list): [z_min, z_max] 형태의 Z축 범위 리스트
                 0이 아닌 레이블이 없으면 (None, [], [])를 반환
         """
-
         coords = np.where(gst > 0)
         
         if coords[0].size == 0:
@@ -384,7 +373,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         box_2d = [int(x_min_padded), int(y_min_padded), int(x_max_padded), int(y_max_padded)]
 
-        # zrange 범위에 해당하는 슬라이스에만 2D 박스 정보를 채워 넣는거
+        # zrange 범위에 해당하는 슬라이스에만 2D 박스 정보를 채워 넣기
         for i in range(zrange[0], zrange[1] + 1):
             boxes_3D[i, 0, :] = box_2d
             
@@ -395,96 +384,42 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         if self.volume_node is None:
             raise RuntimeError("활성 볼륨이 없습니다. 먼저 볼륨을 로드/선택하세요.")
         
-        self.segmentation(filetype='nifti', roi_organs=['liver'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
+        self.segmentation(filetype='nifti', roi_organs=['spleen'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
 
     # segmentation_mask를 가지고 3D slicer에 올려서 시각화해주는 코드
-    def showSegmentation(self, segmentation_mask,name, improve_previous=False):
+    def showSegmentation(self, segmentation_mask, name):
         if self.allSegmentsNode is None:
             self.allSegmentsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
 
         current_seg_group = self.allSegmentsNode
         current_seg_group.SetReferenceImageGeometryParameterFromVolumeNode(self.volume_node)
-
-        labels = np.unique(segmentation_mask)[1:] # all labels except background(0)
+        labels = np.unique(segmentation_mask) #배경라벨 제외하고
+        labels = np.sort(labels)[1:]
 
         for idx, label in enumerate(labels, start=1):
             curr_object = np.zeros_like(segmentation_mask)
             curr_object[segmentation_mask == label] = label
-            #new_seg_label = 'segment_'+str(label)+'_'+str(int(time.time()))
-            new_seg_label = 'segment_'+'label_'+str(label)+'_'+ name
+            new_seg_label = 'segment_'+'label_'+str(label)+'_'+ name 
             segment_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", new_seg_label)
+
             slicer.util.updateVolumeFromArray(segment_volume, curr_object)
-
-            # slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(segment_volume, current_seg_group)
             slicer.util.updateSegmentBinaryLabelmapFromArray(curr_object, current_seg_group, segment_volume.GetName(), self.volume_node)
-
-        if improve_previous:
-            print('Removing segment:', self.lastSegmentLabel)
-            self.allSegmentsNode.GetSegmentation().RemoveSegment(self.lastSegmentLabel)
         
         self.lastSegmentLabel = new_seg_label
         print('self.lastSegmentLabel is updated to', self.lastSegmentLabel)
 
     # 실제 Totalsegmentator돌리는 코드
     def segmentation(self, filetype, roi_organs, ip, port):
-        # 넘파이배열 -> NIFTI파일로 변환해주고 그걸 TOTALSEGMENTATOR에 INPUT으로
-        # 참조 노드에서 IJK→RAS, spacing, origin 가져오기
-        ijkToRas = vtk.vtkMatrix4x4()
-        self.volume_node.GetIJKToRASMatrix(ijkToRas)
-        M = slicer.util.arrayFromVTKMatrix(ijkToRas)  # 4x4
-        spacing = np.array(self.volume_node.GetSpacing(), float)   # (x,y,z)
-        origin_ras = np.array(self.volume_node.GetOrigin(), float)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        hu_output_path = f"/path_Temp/hu_result_{timestamp}.nii.gz"
+        slicer.util.updateVolumeFromArray(self.volume_node, self.image_data_hu)
+        slicer.util.saveNode(self.volume_node, hu_output_path)
 
-        # 방향(RAS) 추출: 상단 3x3은 방향*spacing이므로 열 단위 정규화
-        R_scaled = M[:3, :3]
-        direction_ras = R_scaled / np.linalg.norm(R_scaled, axis=0, keepdims=True)
-
-        # 새 볼륨 노드 만들고 기하 적용
-        outNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "tmp")
-        outNode.SetIJKToRASMatrix(ijkToRas)
-        outNode.SetOrigin(*origin_ras)
-        outNode.SetSpacing(*spacing)
-
-        if self.norm_b:
-            print("정규화 된 상태로 Totalsegmentator실행중")
-            slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            hu_output_path = f"/path_Temp/hu_result_{timestamp}.nii.gz"
-            slicer.util.saveNode(outNode, hu_output_path)
-
-            slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            output_path = f"/path_Temp/result_{timestamp}.nii.gz"
-            slicer.util.saveNode(outNode, output_path)
-
-
-
-        else:
-            print("정규화 안된 상태로 Totalsegmentator실행중")
-            slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            output_path = f"/path_Temp/result_{timestamp}.nii.gz"
-            slicer.util.saveNode(outNode, output_path)
-
-            slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            hu_output_path = f"/path_Temp/hu_result_{timestamp}.nii.gz"
-            slicer.util.saveNode(outNode, hu_output_path)
-
-        
-        slicer.util.updateVolumeFromArray(outNode, self.image_data_norm)
-        slicer.util.updateVolumeFromArray(outNode, self.image_data_hu)
-
-        # 부모 트랜스폼이 걸려 있다면 하든(harden)해서 좌표를 고정
-        if outNode.GetParentTransformNode():
-            slicer.vtkSlicerTransformLogic().hardenTransform(outNode)
-
-
-        # 데이터 서버로 보내주기
+        # 서버 URL
         SERVER_URL = 'http://%s:%s/Totalsegmentator'%(ip, port)
-
-        INPUT_FILE_PATH = output_path 
-        # 모든 장기를 원하면 None으로 설정
+        # 원본파일을 NII.GZ파일로 만든 파일 경로
+        INPUT_FILE_PATH = hu_output_path 
+        # Total segmentator관련 매개변수(고정)
         ROI_SUBSET = roi_organs
 
         if not os.path.exists(INPUT_FILE_PATH):
@@ -499,32 +434,11 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             'output_type': filetype
         }  
 
-        def _print_volume_info(node, title=""):
-            try:
-                img = node.GetImageData()
-                dims = img.GetDimensions() if img else None
-                spacing = node.GetSpacing() if hasattr(node, "GetSpacing") else None
-                origin  = node.GetOrigin() if hasattr(node, "GetOrigin") else None
-                m = vtk.vtkMatrix4x4()
-                node.GetIJKToRASDirectionMatrix(m)
-                logging.info(f"[{title}] dims={dims}, spacing={spacing}, origin={origin}")
-                logging.info(f"[{title}] IJK->RAS:\n" + "\n".join(["  " + " ".join([f"{m.GetElement(r,c): .5f}" for c in range(4)]) for r in range(4)]))
-            except Exception as e:
-                logging.error(f"_print_volume_info error: {e}")
-
-        def _unique_safe(arr, name="arr"):
-            try:
-                u = np.unique(arr)
-                logging.info(f"{name} unique (first 20) = {u[:20]}")
-                return u
-            except Exception as e:
-                logging.error(f"unique() failed for {name}: {e}")
-                return np.array([])
-
         try:
             logging.getLogger().setLevel(logging.INFO)
             logging.info(f"서버({SERVER_URL})에 분할 요청을 보냅니다...")
 
+            # Totalsegmentator로 분할할 nii데이터 서버에 보내기
             response = requests.post(SERVER_URL, files=files, data=data, timeout=600)
             logging.info(f"HTTP status: {response.status_code}")
 
@@ -533,7 +447,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             else:
                 logging.info("서버로부터 NIfTI 데이터를 성공적으로 받았습니다.")
 
-                # --- 압축 해제 ---
+                # 서버에서 받은 데이터 압축해제
                 try:
                     payload = gzip.decompress(response.content)
                     logging.info("gzip.decompress 성공")
@@ -541,7 +455,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                     payload = response.content
                     logging.info("gzip.decompress 불필요 — 원본 사용")
 
-                # --- NIfTI 로드 ---
+                # NIfTI 로드 
                 nifti_file_in_memory = io.BytesIO(payload)
                 file_holder = nib.FileHolder(fileobj=nifti_file_in_memory)
                 file_map = {'image': file_holder}
@@ -551,31 +465,30 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 logging.info(f"NIfTI mask raw: dtype={mask_f.dtype}, shape={mask_f.shape}, "
                             f"min={np.nanmin(mask_f)}, max={np.nanmax(mask_f)}")
 
-                # NaN 방지
+                # NaN 처리
                 if np.isnan(mask_f).any():
                     logging.warning("mask에 NaN 존재 — 0으로 치환")
                     mask_f = np.nan_to_num(mask_f, nan=0)
 
                 # 정수화
                 mask_i = np.rint(mask_f).astype(np.int16, copy=False)
-                u0 = _unique_safe(mask_i, "mask_i(before relabel)")
 
                 # 참조 볼륨 확인
                 if self.volume_node is None:
                     raise RuntimeError("self.volume_node가 None 입니다. 배경 볼륨이 필요합니다.")
                 ref_arr = slicer.util.arrayFromVolume(self.volume_node) 
                 logging.info(f"ref shape={ref_arr.shape}")
-                _print_volume_info(self.volume_node, "REF_VOLUME")
+                # _print_volume_info(self.volume_node, "REF_VOLUME")
 
                 # 축/shape 맞춤 
                 mask_for_slicer = mask_i
                 if mask_i.shape == ref_arr.shape:
-                    logging.info("마스크 shape == 참조 shape (OK)")
+                    print("마스크 shape == 참조 shape (OK)")
                 elif mask_i.shape[::-1] == ref_arr.shape:
-                    logging.info("마스크 shape가 역순 — transpose(2,1,0) 적용")
+                    print("마스크 shape가 역순")
                     mask_for_slicer = np.transpose(mask_i, (2,1,0))
                 else:
-                    logging.error(f"shape 불일치: mask={mask_i.shape}, ref={ref_arr.shape}")
+                    print(f"shape 불일치: mask={mask_i.shape}, ref={ref_arr.shape}")
                     raise RuntimeError("마스크/참조 볼륨 그리드 불일치 — 서버에서 리샘플 필요")
 
                 # 여기서 Totalsegmentator로 한 분할결과 .npz파일로 저장
@@ -585,23 +498,20 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 save_path = os.path.join(script_dir, "TotalSegmentator_mask_result.npz")
                 self.Total_segmentator_mask_path = save_path
+
                 # npz 파일로 저장
                 np.savez(save_path, segs=mask_for_slicer)
                 print(f"TotalSegmentator_mask_result: {self.Total_segmentator_mask_path}")
 
-            #MedSAM2 후보정 실행
-            result_mask = self.segment()
+            # MedSAM2 후보정 실행
+            result_mask = self.segment(IsGrowing = True)
 
             print(f"최종 결과 마스크 shape : {result_mask.shape}")
             print(f"결과마스크 unique : {np.unique(result_mask)}")
 
-            self.scroll_limit(zrange[0], zrange[1])
-            # print(f"z_max: {zrange[1]}")
-
         except Exception as e:
             logging.error("예외 발생:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
-
-        slicer.util.updateVolumeFromArray(outNode, self.image_data) 
+ 
 
 
     # 분할하기 위해서 서버에 데이터 보내는 함수
@@ -651,14 +561,14 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         job_event.set()
     
+    # 경게박스 시각화 함수
     def create3DBBoxROI(self, volumeNode, bboxes, zrange):
         """
-        volumeNode: CT 볼륨 (vtkMRMLScalarVolumeNode)
+        volumeNode: CT 볼륨 
         bboxes: [[x_min, y_min, x_max, y_max], ...]
-        zrange: [z_min, z_max] (slice index, IJK z축 기준)
+        zrange: [z_min, z_max] 
         """
         roi_nodes = []
-        # print(f"bboxes:{bboxes}")
 
         bbox = np.squeeze(bboxes, axis = 1)
         i_min, j_min, i_max, j_max = bbox[zrange[0]]
@@ -669,7 +579,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             [i_max, j_max, k_max]
         ])
 
-        # --- IJK → RAS ---
+        # IJK to RAS 
         ijkToRas = vtk.vtkMatrix4x4()
         volumeNode.GetIJKToRASMatrix(ijkToRas)
         ijkToRas_np = slicer.util.arrayFromVTKMatrix(ijkToRas)
@@ -692,18 +602,16 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         # Display 속성
         roiNode.GetDisplayNode().SetVisibility(True)    # ROI 전체 표시
-        # roiNode.GetDisplayNode().SetVisibility3D(True)  # 3D에 표시
         roiNode.GetDisplayNode().SetVisibility2D(True)  # 2D Slice 뷰에도 표시
 
         roi_nodes.append(roiNode)
 
-        return roi_nodes
-
     # MedSAM2로 분할하는 함수
-    def segment(self):
+    def segment(self, IsGrowing = False):
         self.captureImage()
         result = None
-        # segment할 슬라이스인덱스, 경계박스, z범위
+
+        # 초기 분할이면 Totalsegmentator 분할결과 가져오고, 초기분할이 아니라 수정후 전파면 그전 Medsam2의 분할결과 가져옴
         if self.Medsam2_segmentator_mask_path is None:
             print("inital medsam2")
             with np.load(self.Total_segmentator_mask_path) as data:
@@ -714,15 +622,14 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 result = data['segs'].copy()
 
         result = result.astype(np.int16)
+        # segment할 슬라이스인덱스, z범위, 경계박스
         slice_idx, zrange, boxes_3D = self.get_bounding_info_from_labels(result)
         self.create3DBBoxROI(self.volume_node, boxes_3D, zrange)
-
-        temp_result = None
 
         base_dir = os.path.dirname(__file__)
         
         img_path = os.path.abspath(os.path.join(base_dir, 'img_data.npz'))
-        np.savez(img_path, imgs=self.image_data_norm, boxes=boxes_3D, z_range=[*zrange, slice_idx])
+        np.savez(img_path, imgs=self.image_data_hu, boxes=boxes_3D, z_range=[*zrange, slice_idx])
         gts_path = os.path.abspath(os.path.join(base_dir, 'gts.npz'))
         result_path = os.path.abspath(os.path.join(base_dir,"result.npz"))
 
@@ -733,6 +640,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         temp_seg = self.getSegmentationArray(self.allSegmentsNode)
 
+        # 두 개의 분할이미지를 비교해서 사용자가 수정한 슬라이스 찾는 부분
         if not np.array_equal(result, temp_seg):
             print('두 개가 다름')
             diff = (result != temp_seg)
@@ -743,33 +651,45 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 if np.all(slice == 0):
                     z_index += 1
                 else:
+                    print(f'0인 아닌 슬라이스 : {z_index}')
                     z_index += 1
             np.savez_compressed(gts_path, segs=selected_slices)
         else:
             print('두 개가 같음')
             np.savez_compressed(gts_path, segs=result)
 
-
+        # Medsam2실행
         self.run_on_background(self.segment_helper, (img_path, gts_path, result_path, self.widget.ui.txtIP.text.strip(), self.widget.ui.txtPort.text.strip()), 'Segmenting...')
 
         segmentation_mask = np.load(result_path)
         segs = segmentation_mask['segs'].copy()
         segmentation_mask.close()
 
-        print(f"result_shape : {segs.shape}")
-        print(f"segs_unique : {np.unique(segs)}")
-        self.showSegmentation(segs,f'medsam2_{self.medsam2_index}')
+        # region growing 실행
+        if IsGrowing:
+            print('region growing processing...')
+            refined_mask = self.adaptive_region_growing_2d_V2(self.image_data_hu, segs, lower_k=0.9, upper_k=1.1, min_size=5)
+            final_mask = refined_mask
+        else:
+            final_mask = segs
+
+        print(f"result_shape : {final_mask.shape}")
+        print(f"segs_unique : {np.unique(final_mask)}")
+        self.showSegmentation(final_mask,f'medsam2_{self.medsam2_index}')
         self.medsam2_index += 1
-        temp_result = segs
+        temp_result = final_mask
         self.cachedBoundaries = {'bboxes': boxes_3D, 'zrange': zrange}
         self.widget.ui.CollapsibleButton_5.setVisible(True)
 
         self.Medsam2_segmentator_mask_path = 'Medsam2_segmentator_mask.npz'
         np.savez_compressed(self.Medsam2_segmentator_mask_path, segs=temp_result)
 
-        roiNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsROINode')
+        # 시각화한 경계박스 노드삭제
+        roiNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsR1OINode')
+
         for roiNode in roiNodes:
             slicer.mrmlScene.RemoveNode(roiNode)
+
         self.boundaries = None
 
         return temp_result
@@ -803,9 +723,6 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             if np.any(segArray):
                 result[segArray > 0] = orig_label
 
-        uniq, cnt = np.unique(result, return_counts=True)
-        # print("[getSegmentationArray] labels:", {int(u): int(c) for u, c in zip(uniq, cnt)})
-
         return result
 
     # SegmentEditor로 UI로 바꾸는 함수
@@ -813,14 +730,14 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         slicer.util.selectModule("SegmentEditor") 
 
     # CT 이미지전처리하는 함수
-    def preprocess_CT(self, win_level=40.0, win_width=400.0):
+    def preprocess_CT(self, win_level=50.0, win_width=350.0):
         self.captureImage()
-
+        self.image_data_hu = np.copy(self.image_data)
         img = np.copy(self.image_data)
 
         print(f"preproces함수에서의 min_max: {self.image_data.min()}  , {self.image_data.max()}")
-        self.image_data_hu = np.copy(self.image_data)
 
+        # 여기서 raw hu vale들을 윈도우레벨에 따라 제한하고 정규화 시켜주는데, 현재 Total segmentator와 Medsam2 쓸 때에는 original hu value를 사용함(Medsam2는 자체적으로 정규화 해서 분할함)
         lower_bound, upper_bound = win_level - win_width/2, win_level + win_width/2
         image_data_pre = np.clip(img, lower_bound, upper_bound)
         image_data_pre = (image_data_pre - np.min(image_data_pre))/(np.max(image_data_pre)-np.min(image_data_pre))*255.0
@@ -829,37 +746,29 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.volume_node.GetDisplayNode().SetAutoWindowLevel(False)
         self.volume_node.GetDisplayNode().SetWindowLevelMinMax(0, 255)
 
-        self.image_data_norm = image_data_pre
-
-        print(f"norm_min : {np.min(self.image_data_norm)}  norm_max : {np.max(self.image_data_norm)}")
-        
         return image_data_pre
     
     # MRI 이미지전처리하는 함수
     def preprocess_MR(self, lower_percent=0.5, upper_percent=99.5):
         self.captureImage()
-
         self.image_data_hu = np.copy(self.image_data)
-        
         img = np.copy(self.image_data)
+
         lower_bound, upper_bound = np.percentile(img[img > 0], lower_percent), np.percentile(img[img > 0], upper_percent)
-        image_data_pre = np.clip(self.img, lower_bound, upper_bound)
-        self.image_data_hu = np.copy(image_data_pre)
+        image_data_pre = np.clip(img, lower_bound, upper_bound)
         image_data_pre = (image_data_pre - np.min(image_data_pre))/(np.max(image_data_pre)-np.min(image_data_pre))*255.0
-        image_data_pre = np.uint8(image_data_pre)
+        image_data_pre = np.uint8(image_data_pre)                                 
 
         self.volume_node.GetDisplayNode().SetAutoWindowLevel(False)
         self.volume_node.GetDisplayNode().SetWindowLevelMinMax(0, 255)
 
-        self.image_data_norm = image_data_pre
         return image_data_pre
     
-
     def updateImage(self, new_image):
         self.image_data[:,:,:] = new_image
         slicer.util.arrayFromVolumeModified(self.volume_node)
     
-    # 전처리 진행하는함수
+    # 전처리 진행하는 함수
     def applyPreprocess(self, method, win_level, win_width):
         if method == 'MR':
             prep_img = self.preprocess_MR()
@@ -877,7 +786,6 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
 
         self.updateImage(prep_img)
 
-        
     # config파일과 checkpint가져오는 함수
     def getConfigCheckpoint(self):
         if self.widget.ui.pathConfig.currentPath == '':
@@ -893,83 +801,17 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         
         return config, checkpoint
     
-
-    def scroll_limit(self, z_min, z_max):
-        """
-        Red Slice 뷰 스크롤을 원본 볼륨 위에서 z_min~z_max 범위로 제한
-        """
-        import slicer, vtk
-
-        volumeNode = self.volume_node
-        spacing = volumeNode.GetSpacing()
-        origin = volumeNode.GetOrigin()
-        extent = volumeNode.GetImageData().GetExtent()
-
-        zCoordMin = origin[2] + (extent[4] + z_min) * spacing[2]
-        zCoordMax = origin[2] + (extent[4] + z_max) * spacing[2]
-
-        redSliceNode = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
-
-        def lockRedSliceRange(caller, event):
-            offset = redSliceNode.GetSliceOffset()
-            # ✅ 값이 변할 필요가 있을 때만 Set → 무한 루프 방지
-            if offset < zCoordMin:
-                if offset != zCoordMin:
-                    redSliceNode.SetSliceOffset(zCoordMin)
-            elif offset > zCoordMax:
-                if offset != zCoordMax:
-                    redSliceNode.SetSliceOffset(zCoordMax)
-
-        # 옵저버 등록
-        redSliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent, lockRedSliceRange)
-
-        # 시작을 z_min 위치로 맞춤
-        redSliceNode.SetSliceOffset(zCoordMin)
-
-        print(f"✅ Red Slice 뷰는 이제 {z_min}~{z_max} 범위에서만 스크롤 가능합니다.")
-
-
-    
-    # def scroll_limit_past(self, z_min, z_max):
-    #     # 좌표 변환
-    #     spacing = self.volume_node.GetSpacing()
-    #     origin = self.volume_node.GetOrigin()
-    #     extent = self.volume_node.GetImageData().GetExtent()
-
-    #     zCoordMin = origin[2] + (extent[4] + z_min) * spacing[2]
-    #     zCoordMax = origin[2] + (extent[4] + z_max) * spacing[2]
-
-    #     # Red slice node
-    #     redSliceNode = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
-
-    #     # 제한 함수
-    #     def lockRedSliceRange(caller, event):
-    #         offset = redSliceNode.GetSliceOffset()
-    #         if offset < zCoordMin:
-    #             redSliceNode.SetSliceOffset(zCoordMin)
-    #         elif offset > zCoordMax:
-    #             redSliceNode.SetSliceOffset(zCoordMax)
-
-    #     # 옵저버 연결 (여기서 핵심은 vtk.vtkCommand.ModifiedEvent 사용)
-    #     redSliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent, lockRedSliceRange)
-
-    #     # 시작을 z_min으로 맞추기
-    #     redSliceNode.SetSliceOffset(zCoordMin)
-
-    #     print(f"✅ Red 뷰는 이제 {z_min}~{z_max} 슬라이스 범위에서만 스크롤 가능합니다.")
-    
     # GT데이터 시각화 관련 함수들
     def showGT(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))  # 현재 실행 파일(.py) 경로
-        gt_folder = os.path.join(script_dir,'Mask_Liver2')
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        gt_folder = os.path.join(script_dir,self.GT_folder_name)
         print('gt loading...')
         self.showGTFromFolder(gt_folder)
     
     def showGTFromFolder(self, gt_folder: str, reverse: bool = True):
         """
-        gt_folder 안의 PNG 스택을 읽어 기준 볼륨(self.volume_node)에 정확히 오버레이합니다.
-        - reverse: True면 슬라이스 순서를 뒤집어서 스택 결합
-        - keep_labelmap_node: True면 임시 LabelMap 노드를 남겨둠(디버깅 용)
+        gt_folder 안의 PNG 읽어서 기준 볼륨에 오버레이
+        - reverse: True면 슬라이스 순서를 뒤집어서 결합 - 일단 3D slicer는 거꾸로 데이터들을 받아서 True 설정해줌
         """
         try:
             import sitkUtils 
@@ -980,7 +822,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             if self.volume_node is None:
                 self.captureImage()
             if self.volume_node is None:
-                slicer.util.errorDisplay("활성 볼륨을 찾을 수 없습니다. 먼저 CT/MR 볼륨을 불러오세요.", windowTitle="MedSAM2")
+                slicer.util.errorDisplay("활성 볼륨을 찾을 수 없습니다.", windowTitle="MedSAM2")
                 return None
             
             files = glob.glob(os.path.join(gt_folder, "*.png"))
@@ -996,7 +838,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             if reverse:
                 files = list(reversed(files))
 
-            # PNG → SITK 스택 (라벨)
+            # PNG to SITK  
             slices = [sitk.ReadImage(f) for f in files]
             # 컬러 PNG면 채널 하나 선택
             if slices[0].GetNumberOfComponentsPerPixel() > 1:
@@ -1019,7 +861,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             
             # 기준 볼륨 geometry로 정렬
             if sitkUtils is None:
-                slicer.util.errorDisplay("sitkUtils 모듈을 불러올 수 없습니다. Slicer에서 실행 중인지 확인하세요.", windowTitle="MedSAM2")
+                slicer.util.errorDisplay("sitkUtils 모듈을 불러올 수 없습니다. ", windowTitle="MedSAM2")
                 return None
             
             # volume_node을 SITK이미지로 가져오고
@@ -1029,18 +871,12 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             if list(gt_img.GetSize()) == list(ref_img.GetSize()):
                 gt_img.CopyInformation(ref_img)
                 resampled_gt = gt_img
+
             # 아니면 크기 보간해줌
             else:
-                print("크기가 맞지않아 보간합니다(정확하지 않음)")
-                resampled_gt = sitk.Resample(
-                    gt_img,
-                    ref_img,
-                    sitk.Transform(),             # identity
-                    sitk.sitkNearestNeighbor,     # 라벨 보간
-                    0,
-                    sitk.sitkUInt16
-                )
-
+                print('gt데이터와 원본 데이터의 크기가 맞지 않습니다')
+                return None
+            
             # LabelMap 노드로 푸시 → Segmentation으로 import
             label_name = f"GT_Label_{os.path.basename(gt_folder)}"
             labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", label_name)
@@ -1093,5 +929,61 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
                 windowTitle="MedSAM2"
             )
             return None
+        
+    def adaptive_region_growing_2d_V2(self, img_arr, init_mask, lower_k=0.9, upper_k=1.1, min_size=50):
+        """
+        2D 기반 픽셀분포로 확장
+        Parameters:
+            img_arr : np.ndarray
+                원본 이미지  
+            init_mask : np.ndarray - 그전에 분할된 마스크
+            lower_k, upper_k : float
+                seed intensity 기반 허용 범위
+            min_size : int
+        Returns:
+            refined_mask : np.ndarray
+        """
 
+        labels = np.unique(init_mask[init_mask > 0])
+        # 한번에 여러개 분할하는 로직 아직 처리 X
+        if len(labels) == 0:
+            return init_mask.copy()
+        elif len(labels) > 1:
+            raise ValueError(f"마스크에 라벨이 여러 개 있음: {labels}")
+        
+        label_val = labels[0] 
 
+        refined_mask = init_mask.copy().astype(np.uint8)  
+
+        for z in range(img_arr.shape[0]):
+            slice_img = img_arr[z]
+            slice_mask = init_mask[z]
+
+            seed_pixels = slice_img[slice_mask > 0]
+            if len(seed_pixels) == 0:
+                continue
+
+            mean_intensity = np.mean(seed_pixels)
+
+            lower_thresh = mean_intensity * lower_k
+            upper_thresh = mean_intensity * upper_k
+
+            # 후보 픽셀
+            candidate_mask = (slice_img >= lower_thresh) & (slice_img <= upper_thresh)
+
+            # 초기 마스크 근처만 확장 - 계산 비용생각해서 모폴로지연산으로 확장 후 , 해당 분포에 있는것만 선택하는 식으로
+            dilated_mask = binary_dilation(slice_mask, iterations=2)
+            candidate_mask = candidate_mask & dilated_mask
+
+            # 보정 -> hole filling + closing
+            new_mask = candidate_mask.astype(np.uint8)
+            new_mask = binary_fill_holes(new_mask)
+            new_mask = binary_closing(new_mask, structure=generate_binary_structure(2, 1))
+
+            # 최소 크기 이상인 경우만 반영
+            if new_mask.sum() >= min_size:
+                refined_mask[z] = np.where(new_mask > 0, label_val, refined_mask[z]).astype(np.uint16)
+
+        return refined_mask
+    
+   
