@@ -26,14 +26,14 @@
       <item row="0" column="0">
        <widget class="QLineEdit" name="txtIP">
         <property name="text">
-         <string>IP Address</string>
+         <string>127.0.0.1</string>
         </property>
        </widget>
       </item>
       <item row="0" column="1">
        <widget class="QLineEdit" name="txtPort">
         <property name="text">
-         <string>Port</string>
+         <string>8080</string>
         </property>
        </widget>
       </item>
@@ -115,27 +115,13 @@
    <item>
     <widget class="ctkCollapsibleButton" name="CollapsibleButton_2">
      <property name="text">
-      <string>ROI</string>
+      <string>Initial segmentation</string>
      </property>
      <layout class="QGridLayout" name="gridLayout_3">
-      <item row="1" column="0">
-       <widget class="QPushButton" name="btnStart">
-        <property name="text">
-         <string>Set As Start Slice</string>
-        </property>
-       </widget>
-      </item>
       <item row="2" column="0" colspan="2">
        <widget class="QPushButton" name="btnROI">
         <property name="text">
-         <string>Add Bounding Box</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
-       <widget class="QPushButton" name="btnEnd">
-        <property name="text">
-         <string>Set As End Slice</string>
+         <string>Initial Segmentation</string>
         </property>
        </widget>
       </item>
@@ -145,7 +131,7 @@
       <item row="0" column="0">
        <widget class="QLabel" name="label_5">
         <property name="text">
-         <string>ROI Selection:</string>
+         <string>Organ Selection:</string>
         </property>
         <property name="alignment">
          <set>Qt::AlignCenter</set>
@@ -156,15 +142,16 @@
     </widget>
    </item>
    <item>
+
     <widget class="ctkCollapsibleButton" name="CollapsibleButton_3">
      <property name="text">
-      <string>Segmentation</string>
+      <string>Propagation Segmentation</string>
      </property>
      <layout class="QGridLayout" name="gridLayout_4">
       <item row="3" column="0" colspan="2">
        <widget class="QPushButton" name="btnMiddleSlice">
         <property name="text">
-         <string>Segment Middle Slice</string>
+         <string>show gt mask or turn off</string>
         </property>
        </widget>
       </item>
@@ -203,17 +190,11 @@
         </property>
        </widget>
       </item>
-      <item row="4" column="1" colspan="2">
-       <widget class="QPushButton" name="btnSegment">
-        <property name="text">
-         <string>Full Segmention</string>
-        </property>
-       </widget>
-      </item>
+
       <item row="3" column="2" colspan="2">
        <widget class="QPushButton" name="btnRefine">
         <property name="text">
-         <string>Refine Middle Segmention</string>
+         <string>Refine Mask</string>
         </property>
        </widget>
       </item>
@@ -239,43 +220,48 @@
      </layout>
     </widget>
    </item>
-   <item>
-    <widget class="ctkCollapsibleButton" name="CollapsibleButton_5">
+
+    <item>
+    <widget class="QPushButton" name="btnprop">
      <property name="text">
-      <string>Improve Segmentation</string>
+      <string>Mask Propagation</string>
      </property>
-     <layout class="QGridLayout" name="gridLayout_5">
-      <item row="3" column="1" colspan="2">
-       <widget class="QPushButton" name="btnImprove">
-        <property name="text">
-         <string>Improve Segmention</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0" colspan="4">
-       <widget class="QPushButton" name="btnSubtractPoint">
-        <property name="text">
-         <string>Subtraction Guide Point</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0" colspan="4">
-       <widget class="QPushButton" name="btnAddPoint">
-        <property name="text">
-         <string>Addition Guide Point</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="0" colspan="4">
-       <widget class="QPushButton" name="btnRefine3D">
-        <property name="text">
-         <string>Refine 3D Segmentation</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
     </widget>
    </item>
+
+
+   <item>
+    <widget class="QPushButton" name="btnSave">
+     <property name="text">
+      <string>Save Segmentation</string>
+     </property>
+    </widget>
+   </item>
+
+    <item>
+    <spacer name="verticalSpacer_2">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeType">
+      <enum>QSizePolicy::Fixed</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>30</height> </size>
+     </property>
+    </spacer>
+   </item>
+
+   <item>
+    <widget class="QPushButton" name="btnReset">
+     <property name="text">
+      <string>RESET</string>
+     </property>
+    </widget>
+   </item>
+
    <item>
     <spacer name="verticalSpacer">
      <property name="orientation">

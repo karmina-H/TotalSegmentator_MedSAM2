@@ -35,6 +35,7 @@ import os
 import nibabel as nib
 import SimpleITK as sitk
 import glob
+import qt
 
 import re
 
@@ -134,10 +135,16 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
         # Preprocessing
-        self.ui.cmbPrepOptions.addItems(['Manual', 'Abdominal CT', 'Lung CT', 'Brain CT', 'Mediastinum CT', 'MR'])
+        self.ui.cmbPrepOptions.addItems(['Abdominal CT', 'Manual', 'Lung CT', 'Brain CT', 'Mediastinum CT', 'MR'])
         self.ui.cmbPrepOptions.currentTextChanged.connect(lambda new_text: self.setManualPreprocessVis(new_text == 'Manual'))
         self.ui.pbApplyPrep.connect('clicked(bool)', lambda: self.logic.applyPreprocess(self.ui.cmbPrepOptions.currentText, self.ui.sldWinLevel.value, self.ui.sldWinWidth.value))
-        self.ui.cmbSlicerIdx.addItems(['Select ROI on the current frame'])
+
+        self.ui.cmbSlicerIdx.addItems(['spleen','liver'])
+        self.ui.btnROI.connect('clicked(bool)', lambda: self.logic.set_organ(self.ui.cmbSlicerIdx.currentText))
+        self.ui.lblLevel.setVisible(False)
+        self.ui.lblWidth.setVisible(False)
+        self.ui.sldWinLevel.setVisible(False)
+        self.ui.sldWinWidth.setVisible(False)
 
 
 
@@ -148,6 +155,7 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             'Heart ultra sound': 'MedSAM2_US_Heart.pt',
             'Base model': 'MedSAM2_2411.pt'
         }
+
         self.ui.cmbCheckpoint.addItems(list(self.checkpoint_list.keys()))
         self.ui.pathModel.connect('currentPathChanged(const QString&)', lambda: setattr(self.logic, 'newModelUploaded', False))
         self.ui.pathConfig.connect('currentPathChanged(const QString&)', lambda: setattr(self.logic, 'newConfigUploaded', False))
@@ -157,33 +165,17 @@ class MedSAM2Widget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         from PythonQt.QtGui import QIcon
         iconsPath = os.path.join(os.path.dirname(__file__), 'Resources/Icons')
         self.ui.pbApplyPrep.setIcon(QIcon(os.path.join(iconsPath, 'verify.png')))
-        #self.ui.btnStart.setText("Normalization")
-        self.ui.btnROI.setText("Initial Segmentation")
-        self.ui.btnSegment.setText("Refined Mask Propagation")
-        
         self.ui.btnRefine.setIcon(QIcon(os.path.join(iconsPath, 'performance.png')))
-        self.ui.btnSegment.setIcon(QIcon(os.path.join(iconsPath, 'body-scan.png')))
-        self.ui.btnRefine3D.setIcon(QIcon(os.path.join(iconsPath, 'performance.png')))
-        self.ui.btnAddPoint.setIcon(QIcon(os.path.join(iconsPath, 'add-selection.png')))
-        self.ui.btnSubtractPoint.setIcon(QIcon(os.path.join(iconsPath, 'sub-selection.png')))
-        self.ui.btnMiddleSlice.setText('show gt mask or turn off')
 
         # Buttons
-        self.ui.btnROI.connect("clicked(bool)", self.logic.run_TotalSegmentator) # 정규화버튼
-        #self.ui.btnStart.connect("clicked(bool)", self.logic.norm_btn)
+        self.ui.btnROI.connect("clicked(bool)", self.logic.run_TotalSegmentator) 
         self.ui.btnRefine.connect("clicked(bool)", self.logic.refineMiddleMask)
-        self.ui.btnSegment.connect("clicked(bool)", self.logic.segment)
-        self.ui.btnRefine3D.connect("clicked(bool)", self.logic.refineMiddleMask)
-        self.ui.btnAddPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='addition'))
-        self.ui.btnSubtractPoint.connect("clicked(bool)", lambda: self.addPoint(prefix='subtraction'))
+        self.ui.btnprop.connect("clicked(bool)", self.logic.segment)
         self.ui.btnMiddleSlice.connect("clicked(bool)", self.logic.showGT) # 이거 GT데이터 보여주는 버튼
+        self.ui.btnSave.connect('clicked(bool)', self.logic.onSaveButtonClicked) # 분할된 결과 저장버튼 
+        self.ui.btnReset.connect('clicked(bool)', self.logic.onResetButtonClicked) # 분할된 결과 저장버튼 
+        self.ui.btnprop.setVisible(True)
 
-        self.ui.btnStart.setVisible(False)    
-        self.ui.btnEnd.setVisible(False)    
-        self.ui.CollapsibleButton_5.setVisible(False)
-        self.ui.btnAddPoint.setVisible(False)
-        self.ui.btnSubtractPoint.setVisible(False)
-        self.ui.btnRefine3D.setVisible(False)
         
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -275,6 +267,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     """
     
     GT_folder_name = 'Mask_spleen2'
+    organ_name = None
     image_data_hu = None
     boundaries = None
     volume_node = None
@@ -384,7 +377,7 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         if self.volume_node is None:
             raise RuntimeError("활성 볼륨이 없습니다. 먼저 볼륨을 로드/선택하세요.")
         
-        self.segmentation(filetype='nifti', roi_organs=['spleen'], ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
+        self.segmentation(filetype='nifti', roi_organs=self.organ_name, ip = self.widget.ui.txtIP.text.strip(), port = self.widget.ui.txtPort.text.strip())
 
     # segmentation_mask를 가지고 3D slicer에 올려서 시각화해주는 코드
     def showSegmentation(self, segmentation_mask, name):
@@ -679,18 +672,18 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
         self.medsam2_index += 1
         temp_result = final_mask
         self.cachedBoundaries = {'bboxes': boxes_3D, 'zrange': zrange}
-        self.widget.ui.CollapsibleButton_5.setVisible(True)
+        # self.widget.ui.CollapsibleButton_5.setVisible(True)
 
         self.Medsam2_segmentator_mask_path = 'Medsam2_segmentator_mask.npz'
         np.savez_compressed(self.Medsam2_segmentator_mask_path, segs=temp_result)
 
-        # 시각화한 경계박스 노드삭제
-        roiNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsR1OINode')
+        # # 시각화한 경계박스 노드삭제
+        # roiNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsR1OINode')
 
-        for roiNode in roiNodes:
-            slicer.mrmlScene.RemoveNode(roiNode)
+        # for roiNode in roiNodes:
+        #     slicer.mrmlScene.RemoveNode(roiNode)
 
-        self.boundaries = None
+        # self.boundaries = None
 
         return temp_result
     
@@ -767,6 +760,11 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
     def updateImage(self, new_image):
         self.image_data[:,:,:] = new_image
         slicer.util.arrayFromVolumeModified(self.volume_node)
+
+    def set_organ(self, organ_name):
+        print(f"현재 장기 : {organ_name}")
+        self.organ_name = organ_name
+        return
     
     # 전처리 진행하는 함수
     def applyPreprocess(self, method, win_level, win_width):
@@ -800,7 +798,110 @@ class MedSAM2Logic(ScriptedLoadableModuleLogic):
             checkpoint = os.path.join(model_name, os.path.basename(self.widget.ui.pathModel.currentPath))
         
         return config, checkpoint
-    
+
+
+    def onSaveButtonClicked(self):
+        print("저장 버튼클릭스")
+        """
+        'Save' 버튼을 클릭했을 때 호출되는 함수.
+        현재 분할 노드를 .nrrd 레이블맵 파일로 저장합니다.
+        """
+        try:
+            # 1. 저장할 분할(Segmentation) 노드를 가져옵니다.
+            # 이 노드는 분할 작업 후 self.segmentationNode와 같은 변수에 저장되어 있어야 합니다.
+            # 실제 사용하는 변수명으로 수정해주세요. 예를 들어, self.allSegmentsNode 등
+            segmentationNode = self.allSegmentsNode 
+            
+            if not segmentationNode:
+                slicer.util.warningDisplay("저장할 분-할 노드가 없습니다. 먼저 분할을 실행해주세요.")
+                return
+
+            # # 2. 파일 저장 대화상자를 열어 사용자로부터 저장 경로와 파일명을 입력받습니다.
+            # # qt.QFileDialog.getSaveFileName()을 사용합니다.
+            # default_filename = f"{segmentationNode.GetName()}.nrrd"
+            # filePath, _ = qt.QFileDialog.getSaveFileName(None, "Save Segmentation as NRRD", default_filename, "NRRD Files (*.nrrd)")
+
+            # 2. 바탕화면 경로를 찾고, 'segmentation_result' 폴더 경로를 설정합니다.
+            # os.path.expanduser('~')는 사용자 홈 디렉토리 경로를 반환합니다.
+            desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
+            target_dir = os.path.join(desktop_path, 'custom_segmentation_result')
+
+            # 3. 폴더가 존재하지 않으면 새로 생성합니다.
+            # exist_ok=True 옵션은 폴더가 이미 있어도 에러를 발생시키지 않습니다.
+            os.makedirs(target_dir, exist_ok=True)
+            
+            # 4. 고유한 파일명을 생성합니다. (예: "Segmentation_20251002_163000.nrrd")
+            # 현재 시간을 YYYYMMDD_HHMMSS 형식으로 가져옵니다.
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            # 노드 이름에서 공백이나 특수문자가 있다면 밑줄(_)로 변경해주는 것이 안전합니다.
+            base_filename = segmentationNode.GetName().replace(' ', '_')
+            
+            filename = f"{base_filename}_{timestamp}.nrrd"
+            
+            # 5. 최종 저장 경로를 조합합니다.
+            filePath = os.path.join(target_dir, filename)
+
+            # 사용자가 대화상자를 취소한 경우
+            if not filePath:
+                print("저장이 취소되었습니다.")
+                return
+
+            # 3. (가장 중요한 단계) Segmentation 노드를 Labelmap Volume 노드로 변환합니다.
+            # 이 과정을 거쳐야 일반적인 .nrrd 파일로 저장할 수 있습니다.
+            labelmapVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
+            
+            # 현재 보이는(visible) 세그먼트들만 내보냅니다.
+            slicer.modules.segmentations.logic().ExportVisibleSegmentsToLabelmapNode(segmentationNode, labelmapVolumeNode)
+
+            # 4. 변환된 Labelmap 노드를 지정된 경로에 저장합니다.
+            # slicer.util.saveNode() 함수가 실제 저장 기능을 수행합니다.
+            success = slicer.util.saveNode(labelmapVolumeNode, filePath)
+
+            # 5. 임시로 생성했던 Labelmap 노드를 씬에서 제거하여 정리합니다.
+            slicer.mrmlScene.RemoveNode(labelmapVolumeNode)
+
+            if success:
+                slicer.util.infoDisplay(f"분할 결과가 성공적으로 저장되었습니다:\n{filePath}")
+                print(f"저장 성공: {filePath}")
+            else:
+                slicer.util.errorDisplay(f"파일 저장에 실패했습니다.")
+
+        except Exception as e:
+            slicer.util.errorDisplay(f"오류가 발생했습니다: {e}")
+            import traceback
+            traceback.print_exc()
+        
+    def onResetButtonClicked(self):
+        # 1. 클래스 내부 변수들을 초기 상태로 리셋
+        self.GT_folder_name = 'Mask_spleen2'
+        self.organ_name = None
+        self.image_data_hu = None
+        self.boundaries = None
+        self.volume_node = None
+        self.image_data = None
+        # self.widget = None # widget 자체를 None으로 만들면 UI가 사라질 수 있으므로 보통 이 줄은 제외합니다.
+        self.middleMaskNode = None
+        self.allSegmentsNode = None
+        self.newModelUploaded = False
+        self.newConfigUploaded = False
+        self.cachedBoundaries = None
+        self.lastSegmentLabel = None
+        self.Total_segmentator_mask_path = None
+        self.Medsam2_segmentator_mask_path = None
+        self.medsam2_index = 0
+        
+        # 2. 씬(Scene)의 모든 노드(데이터, 마스크, ROI 등)를 삭제
+        # Clear(0)의 0은 "사용자에게 확인 창을 띄우지 말고 삭제"하라는 의미입니다.
+        slicer.mrmlScene.Clear(0)
+
+        # 3. 2D/3D 뷰어들을 초기 상태로 리셋 (권장)
+        # 씬을 클리어한 후에도 뷰어에 마지막 이미지가 남아있는 경우가 있으므로 뷰어도 리셋해주는 것이 좋습니다.
+        slicer.util.resetSliceViews()
+        slicer.util.resetThreeDViews()
+        
+        print("리셋 버튼 클릭: 씬과 뷰어가 모두 초기화되었습니다.")
+
     # GT데이터 시각화 관련 함수들
     def showGT(self):
         script_dir = os.path.dirname(os.path.abspath(__file__))
